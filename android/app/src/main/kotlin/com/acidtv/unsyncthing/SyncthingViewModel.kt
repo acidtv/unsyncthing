@@ -38,15 +38,30 @@ sealed class UiState {
         val currentDir: String = "",
     ) : UiState() {
         val entries: List<FileEntry> get() {
-            val children = allEntries.filter { entry ->
-                if (currentDir.isEmpty()) {
-                    !entry.path.contains('/')
+            val prefix = if (currentDir.isEmpty()) "" else "$currentDir/"
+            // Use a map keyed by the immediate child name so each name appears once.
+            val seen = mutableMapOf<String, FileEntry>()
+            for (entry in allEntries) {
+                val relative = if (prefix.isEmpty()) entry.path
+                               else if (entry.path.startsWith(prefix)) entry.path.removePrefix(prefix)
+                               else continue
+                val slash = relative.indexOf('/')
+                if (slash == -1) {
+                    // Direct child at this level — use its real entry.
+                    seen.getOrPut(relative) { entry }
                 } else {
-                    entry.path.startsWith("$currentDir/") &&
-                        !entry.path.removePrefix("$currentDir/").contains('/')
+                    // File lives deeper: ensure the immediate subdirectory is visible.
+                    // Syncthing doesn't always send explicit directory FileInfo entries,
+                    // so synthesize one from the path if we haven't seen a real one yet.
+                    val dirName = relative.substring(0, slash)
+                    val dirPath = "$prefix$dirName"
+                    seen.getOrPut(dirName) {
+                        allEntries.find { it.path == dirPath && it.isDir }
+                            ?: FileEntry(dirName, dirPath, 0L, 0L, true)
+                    }
                 }
             }
-            return children.sortedWith(compareByDescending<FileEntry> { it.isDir }.thenBy { it.name })
+            return seen.values.sortedWith(compareByDescending<FileEntry> { it.isDir }.thenBy { it.name })
         }
     }
     data class Error(val message: String) : UiState()
