@@ -16,6 +16,7 @@ $(AAR): $(shell find $(STCLIENT) -name '*.go')
 	mkdir -p android/app/libs
 	cd $(STCLIENT) && $(GOMOBILE) bind \
 		-target android \
+		-androidapi 21 \
 		-javapkg com.acidtv.unsyncthing \
 		-o ../$(AAR) \
 		.
