@@ -10,7 +10,7 @@
         android:id="@+id/tvIcon"
         android:layout_width="36dp"
         android:layout_height="wrap_content"
-        android:textSize="24sp" />
+        android:textSize="28sp" />
 
     <LinearLayout
         android:layout_width="0dp"
@@ -23,14 +23,14 @@
             android:id="@+id/tvName"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textAppearance="?attr/textAppearanceBodyLarge"
+            android:textAppearance="?attr/textAppearanceTitleMedium"
             android:singleLine="true" />
 
         <TextView
             android:id="@+id/tvMeta"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textAppearance="?attr/textAppearanceBodySmall" />
+            android:textAppearance="?attr/textAppearanceBodyMedium" />
 
     </LinearLayout>
 
