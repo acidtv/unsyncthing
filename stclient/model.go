@@ -14,26 +14,20 @@ type peerModel struct {
 	mu      sync.RWMutex
 	folders map[string][]protocol.FileInfo
 	waiters map[string][]chan struct{}
-	wanted  map[string]bool
 }
 
-func newPeerModel(folderIDs []string) *peerModel {
-	wanted := make(map[string]bool, len(folderIDs))
-	for _, id := range folderIDs {
-		wanted[id] = true
-	}
+func newPeerModel(_ []string) *peerModel {
 	return &peerModel{
 		folders: make(map[string][]protocol.FileInfo),
 		waiters: make(map[string][]chan struct{}),
-		wanted:  wanted,
 	}
 }
 
-func (m *peerModel) Index(conn protocol.Connection, folder string, files []protocol.FileInfo) error {
+func (m *peerModel) Index(_ protocol.Connection, idx *protocol.Index) error {
 	m.mu.Lock()
-	m.folders[folder] = files
-	waiters := m.waiters[folder]
-	delete(m.waiters, folder)
+	m.folders[idx.Folder] = idx.Files
+	waiters := m.waiters[idx.Folder]
+	delete(m.waiters, idx.Folder)
 	m.mu.Unlock()
 	for _, ch := range waiters {
 		close(ch)
@@ -41,53 +35,38 @@ func (m *peerModel) Index(conn protocol.Connection, folder string, files []proto
 	return nil
 }
 
-func (m *peerModel) IndexUpdate(conn protocol.Connection, folder string, files []protocol.FileInfo) error {
+func (m *peerModel) IndexUpdate(_ protocol.Connection, idxUp *protocol.IndexUpdate) error {
 	m.mu.Lock()
-	existing := m.folders[folder]
+	existing := m.folders[idxUp.Folder]
 	byName := make(map[string]int, len(existing))
 	for i, f := range existing {
 		byName[f.Name] = i
 	}
-	for _, f := range files {
+	for _, f := range idxUp.Files {
 		if i, ok := byName[f.Name]; ok {
 			existing[i] = f
 		} else {
 			existing = append(existing, f)
 		}
 	}
-	m.folders[folder] = existing
+	m.folders[idxUp.Folder] = existing
 	m.mu.Unlock()
 	return nil
 }
 
 // Request is called when the peer asks us for data. We don't serve files.
-func (m *peerModel) Request(
-	conn protocol.Connection,
-	folder, name string,
-	blockNo int,
-	hash []byte,
-	weakHash uint32,
-	fromTemporary bool,
-	offset int64,
-	size int32,
-	buf []byte,
-) (protocol.RequestResponse, error) {
-	// NOTE: the exact signature here must match the protocol.Model interface
-	// for the syncthing version in go.mod. Adjust if compilation fails.
+func (m *peerModel) Request(_ protocol.Connection, req *protocol.Request) (protocol.RequestResponse, error) {
+	_ = req
 	return nil, protocol.ErrNoSuchFile
 }
 
-func (m *peerModel) ClusterConfig(conn protocol.Connection, config protocol.ClusterConfig) error {
+func (m *peerModel) ClusterConfig(_ protocol.Connection, _ *protocol.ClusterConfig) error {
 	return nil
 }
 
-func (m *peerModel) Closed(conn protocol.Connection, err error) {}
+func (m *peerModel) Closed(_ protocol.Connection, _ error) {}
 
-func (m *peerModel) DownloadProgress(
-	conn protocol.Connection,
-	folder string,
-	updates []protocol.FileDownloadProgressUpdate,
-) error {
+func (m *peerModel) DownloadProgress(_ protocol.Connection, _ *protocol.DownloadProgress) error {
 	return nil
 }
 

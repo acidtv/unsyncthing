@@ -1,6 +1,7 @@
 package stclient
 
 import (
+	"context"
 	"fmt"
 	"os"
 )
@@ -23,31 +24,17 @@ func (c *Client) FetchFile(folderID, filePath, destPath string, progress FetchPr
 	}
 
 	files := c.model.files(folderID)
-	var target *struct {
-		size   int64
-		blocks []blockRef
-	}
-	for _, f := range files {
+	idx := -1
+	for i, f := range files {
 		if f.Name == filePath {
-			blocks := make([]blockRef, len(f.Blocks))
-			for i, b := range f.Blocks {
-				blocks[i] = blockRef{
-					offset:   b.Offset,
-					size:     int(b.Size),
-					hash:     b.Hash,
-					weakHash: b.WeakHash,
-				}
-			}
-			target = &struct {
-				size   int64
-				blocks []blockRef
-			}{size: f.Size, blocks: blocks}
+			idx = i
 			break
 		}
 	}
-	if target == nil {
+	if idx < 0 {
 		return fmt.Errorf("file %q not in index for folder %q", filePath, folderID)
 	}
+	target := files[idx]
 
 	f, err := os.Create(destPath)
 	if err != nil {
@@ -55,25 +42,25 @@ func (c *Client) FetchFile(folderID, filePath, destPath string, progress FetchPr
 	}
 	defer f.Close()
 
+	ctx := context.Background()
 	var downloaded int64
-	for i, b := range target.blocks {
-		// NOTE: Connection.Request signature matches syncthing ≥ v1.20.
-		// Returns ([]byte, error); adjust if your version differs.
-		data, err := c.conn.Request(folderID, filePath, b.offset, b.size, b.hash, b.weakHash, false)
+
+	for blockNo, b := range target.Blocks {
+		data, err := c.conn.Request(ctx, folderID, filePath, blockNo, b.Offset, int(b.Size), b.Hash, b.WeakHash, false)
 		if err != nil {
 			os.Remove(destPath)
 			if progress != nil {
-				progress.OnError(fmt.Sprintf("block %d: %v", i, err))
+				progress.OnError(fmt.Sprintf("block %d: %v", blockNo, err))
 			}
-			return fmt.Errorf("request block %d: %w", i, err)
+			return fmt.Errorf("request block %d: %w", blockNo, err)
 		}
 		if _, err := f.Write(data); err != nil {
 			os.Remove(destPath)
-			return fmt.Errorf("write block %d: %w", i, err)
+			return fmt.Errorf("write block %d: %w", blockNo, err)
 		}
-		downloaded += int64(b.size)
+		downloaded += int64(b.Size)
 		if progress != nil {
-			progress.OnProgress(downloaded, target.size)
+			progress.OnProgress(downloaded, target.Size)
 		}
 	}
 
@@ -81,11 +68,4 @@ func (c *Client) FetchFile(folderID, filePath, destPath string, progress FetchPr
 		progress.OnDone(destPath)
 	}
 	return nil
-}
-
-type blockRef struct {
-	offset   int64
-	size     int
-	hash     []byte
-	weakHash uint32
 }

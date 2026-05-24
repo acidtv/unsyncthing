@@ -1,5 +1,3 @@
-// Package stclient is a gomobile-compatible Syncthing BEP client.
-// Build the Android AAR with: gomobile bind -target android -javapkg com.acidtv.unsyncthing -o stclient.aar .
 package stclient
 
 import (
@@ -35,14 +33,13 @@ func NewClient(certPEM, keyPEM string) (*Client, error) {
 }
 
 // DeviceID returns our device ID. Share this string with the remote peer so
-// it can authorize our connection in its Syncthing settings.
+// it can authorise our connection in its Syncthing settings.
 func (c *Client) DeviceID() string {
 	return c.myID.String()
 }
 
 // Connect dials addr (host:port) and establishes an authenticated BEP session.
-// peerDeviceID must match the remote peer's certificate; this is verified before
-// any data is exchanged.
+// peerDeviceID must match the remote peer's certificate.
 // folderIDs is a comma-separated list of folder IDs to request from the peer
 // (find them in the peer's Syncthing web UI under each folder's edit dialog).
 func (c *Client) Connect(addr, peerDeviceIDStr, folderIDs string) error {
@@ -77,16 +74,17 @@ func (c *Client) Connect(addr, peerDeviceIDStr, folderIDs string) error {
 	folders := splitFolderIDs(folderIDs)
 	c.model = newPeerModel(folders)
 
-	// NOTE: NewConnection signature may vary across syncthing versions.
-	// The parameters here match syncthing ≥ v1.20. If compilation fails,
-	// check lib/protocol/connection.go in your checked-out version.
+	// tls.Conn satisfies io.Reader, io.Writer, and io.Closer separately.
 	c.conn = protocol.NewConnection(
 		peerID,
-		tlsConn,
-		tlsConn,
+		tlsConn,                   // io.Reader
+		tlsConn,                   // io.Writer
+		tlsConn,                   // io.Closer
 		c.model,
-		addr,
-		protocol.CompressMetadata,
+		&tlsConnInfo{tlsConn, addr},
+		protocol.CompressionMetadata,
+		nil,  // folder passwords
+		nil,  // key generator
 	)
 	c.conn.Start()
 
@@ -137,11 +135,25 @@ func buildClusterConfig(myID protocol.DeviceID, folderIDs []string) protocol.Clu
 	folders := make([]protocol.Folder, len(folderIDs))
 	for i, id := range folderIDs {
 		folders[i] = protocol.Folder{
-			ID: id,
-			Devices: []protocol.Device{
-				{ID: myID},
-			},
+			ID:      id,
+			Devices: []protocol.Device{{ID: myID}},
 		}
 	}
 	return protocol.ClusterConfig{Folders: folders}
 }
+
+// tlsConnInfo implements protocol.ConnectionInfo for a raw TLS connection.
+type tlsConnInfo struct {
+	conn *tls.Conn
+	addr string
+}
+
+func (i *tlsConnInfo) Type() string            { return "tcp" }
+func (i *tlsConnInfo) Transport() string       { return "tcp" }
+func (i *tlsConnInfo) IsLocal() bool           { return false }
+func (i *tlsConnInfo) RemoteAddr() net.Addr    { return i.conn.RemoteAddr() }
+func (i *tlsConnInfo) Priority() int           { return 0 }
+func (i *tlsConnInfo) String() string          { return i.addr }
+func (i *tlsConnInfo) Crypto() string          { return "tls" }
+func (i *tlsConnInfo) EstablishedAt() time.Time { return time.Now() }
+func (i *tlsConnInfo) ConnectionID() string    { return i.addr }

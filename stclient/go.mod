@@ -2,9 +2,25 @@ module github.com/acidtv/unsyncthing/stclient
 
 go 1.22
 
+require github.com/syncthing/syncthing v1.27.4
+
 require (
-	github.com/syncthing/syncthing v1.27.4
-	golang.org/x/mobile v0.0.0-20240213143359-d1f7d3436075
+	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/cespare/xxhash/v2 v2.2.0 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
+	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.6 // indirect
+	github.com/minio/sha256-simd v1.0.1 // indirect
+	github.com/miscreant/miscreant.go v0.0.0-20200214223636-26d376326b75 // indirect
+	github.com/pierrec/lz4/v4 v4.1.21 // indirect
+	github.com/prometheus/client_golang v1.18.0 // indirect
+	github.com/prometheus/client_model v0.5.0 // indirect
+	github.com/prometheus/common v0.46.0 // indirect
+	github.com/prometheus/procfs v0.12.0 // indirect
+	golang.org/x/crypto v0.19.0 // indirect
+	golang.org/x/sys v0.17.0 // indirect
+	golang.org/x/text v0.14.0 // indirect
+	google.golang.org/protobuf v1.32.0 // indirect
 )
 
 // Run `go mod tidy` after cloning to populate go.sum and indirect deps.

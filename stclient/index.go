@@ -28,7 +28,7 @@ func (c *Client) ListFolder(folderID string) ([]byte, error) {
 
 	entries := make([]FileEntry, 0, len(files))
 	for _, f := range files {
-		if f.Deleted || f.Invalid {
+		if f.IsDeleted() || f.IsInvalid() {
 			continue
 		}
 		entries = append(entries, FileEntry{
