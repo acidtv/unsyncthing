@@ -21,9 +21,10 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         adapter = FileListAdapter { entry ->
+            if (entry.isDir) return@FileListAdapter
             val state = vm.state.value
             if (state is UiState.FileList) {
-                if (!entry.isDir) vm.fetchFile(state.folderID, entry.path)
+                vm.fetchFile(state.folderID, entry.path)
             }
         }
 
@@ -44,38 +45,53 @@ class MainActivity : AppCompatActivity() {
             vm.connect(addr, peerID, folder)
         }
 
-        binding.tvDeviceID.text = "My device ID:\n${vm.deviceID}"
+        vm.deviceID.observe(this) { id ->
+            binding.tvDeviceID.text = if (id != null) "My device ID:\n$id" else "Generating identity…"
+            refreshConnectButton()
+        }
 
         vm.state.observe(this) { state ->
             when (state) {
-                is UiState.Idle -> showConnectForm(enabled = true)
-                is UiState.Connecting -> {
-                    showConnectForm(enabled = false)
-                    binding.tvStatus.text = "Connecting…"
+                is UiState.Idle -> {
+                    binding.connectForm.visibility = View.VISIBLE
+                    refreshConnectButton()
+                    if (vm.download.value == null) binding.tvStatus.text = ""
                 }
-                is UiState.Connected -> {
-                    binding.tvStatus.text = "Connected — loading index…"
+                is UiState.Connecting -> {
+                    binding.connectForm.visibility = View.VISIBLE
+                    binding.btnConnect.isEnabled = false
+                    binding.tvStatus.text = "Connecting…"
                 }
                 is UiState.FileList -> {
                     binding.connectForm.visibility = View.GONE
-                    binding.tvStatus.text = "${state.folderID}  (${state.entries.size} items)"
                     adapter.submitList(state.entries)
-                }
-                is UiState.Downloading -> {
-                    val pct = if (state.total > 0) (state.downloaded * 100 / state.total) else 0
-                    binding.tvStatus.text = "Downloading ${state.path} — $pct%"
+                    if (vm.download.value == null) {
+                        binding.tvStatus.text = "${state.folderID}  (${state.entries.size} items)"
+                    }
                 }
                 is UiState.Error -> {
-                    showConnectForm(enabled = true)
+                    binding.connectForm.visibility = View.VISIBLE
+                    refreshConnectButton()
+                    binding.tvStatus.text = ""
                     Toast.makeText(this, state.message, Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+
+        vm.download.observe(this) { dl ->
+            if (dl != null) {
+                val pct = if (dl.total > 0) (dl.downloaded * 100 / dl.total) else 0
+                binding.tvStatus.text = "Downloading ${dl.path} — $pct%"
+            } else {
+                val state = vm.state.value
+                if (state is UiState.FileList) {
+                    binding.tvStatus.text = "${state.folderID}  (${state.entries.size} items)"
                 }
             }
         }
     }
 
-    private fun showConnectForm(enabled: Boolean) {
-        binding.connectForm.visibility = View.VISIBLE
-        binding.btnConnect.isEnabled = enabled
-        binding.tvStatus.text = if (enabled) "" else "Connecting…"
+    private fun refreshConnectButton() {
+        binding.btnConnect.isEnabled = vm.deviceID.value != null
     }
 }

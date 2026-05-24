@@ -1,3 +1,5 @@
+// Package stclient is a gomobile-compatible Syncthing BEP client.
+// Build the Android AAR with: gomobile bind -target android -javapkg com.acidtv.unsyncthing -o stclient.aar .
 package stclient
 
 import (
@@ -5,14 +7,23 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/syncthing/syncthing/lib/protocol"
 )
 
+const (
+	clientName       = "unsyncthing"
+	clientVersion    = "v0.1.0"
+	dialTimeout      = 30 * time.Second
+	handshakeTimeout = 30 * time.Second
+)
+
 // Client manages a single BEP connection to a Syncthing peer.
-// Create one per peer; safe to call from multiple goroutines after Connect.
+// Safe for concurrent use after Connect.
 type Client struct {
+	mu    sync.Mutex
 	myID  protocol.DeviceID
 	cert  tls.Certificate
 	conn  protocol.Connection
@@ -25,6 +36,9 @@ func NewClient(certPEM, keyPEM string) (*Client, error) {
 	cert, err := loadCert(certPEM, keyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("parse cert: %w", err)
+	}
+	if len(cert.Certificate) == 0 {
+		return nil, fmt.Errorf("certificate chain is empty")
 	}
 	return &Client{
 		myID: protocol.NewDeviceID(cert.Certificate[0]),
@@ -39,13 +53,21 @@ func (c *Client) DeviceID() string {
 }
 
 // Connect dials addr (host:port) and establishes an authenticated BEP session.
-// peerDeviceID must match the remote peer's certificate.
-// folderIDs is a comma-separated list of folder IDs to request from the peer
-// (find them in the peer's Syncthing web UI under each folder's edit dialog).
+// Idempotent: any previous connection on this Client is closed first.
 func (c *Client) Connect(addr, peerDeviceIDStr, folderIDs string) error {
 	peerID, err := protocol.DeviceIDFromString(peerDeviceIDStr)
 	if err != nil {
 		return fmt.Errorf("invalid peer device ID: %w", err)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Close any prior connection before opening a new one.
+	if c.conn != nil {
+		c.conn.Close(nil)
+		c.conn = nil
+		c.model = nil
 	}
 
 	tlsConf := &tls.Config{
@@ -55,10 +77,13 @@ func (c *Client) Connect(addr, peerDeviceIDStr, folderIDs string) error {
 		MinVersion:         tls.VersionTLS12,
 	}
 
-	netConn, err := net.DialTimeout("tcp", addr, 30*time.Second)
+	netConn, err := net.DialTimeout("tcp", addr, dialTimeout)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", addr, err)
 	}
+
+	// Bound the TLS handshake + BEP hello with an absolute deadline.
+	netConn.SetDeadline(time.Now().Add(handshakeTimeout))
 
 	tlsConn := tls.Client(netConn, tlsConf)
 	if err := tlsConn.Handshake(); err != nil {
@@ -71,42 +96,70 @@ func (c *Client) Connect(addr, peerDeviceIDStr, folderIDs string) error {
 		return err
 	}
 
+	// BEP Hello exchange — protocol.NewConnection does NOT do this.
+	// See syncthing/lib/protocol/hello.go.
+	if _, err := protocol.ExchangeHello(tlsConn, protocol.Hello{
+		DeviceName:    clientName,
+		ClientName:    clientName,
+		ClientVersion: clientVersion,
+		Timestamp:     time.Now().UnixNano(),
+	}); err != nil {
+		tlsConn.Close()
+		return fmt.Errorf("BEP hello: %w", err)
+	}
+
+	// Past the handshake phase — clear the deadline.
+	netConn.SetDeadline(time.Time{})
+
 	folders := splitFolderIDs(folderIDs)
-	c.model = newPeerModel(folders)
-
-	// tls.Conn satisfies io.Reader, io.Writer, and io.Closer separately.
-	c.conn = protocol.NewConnection(
+	model := newPeerModel()
+	conn := protocol.NewConnection(
 		peerID,
-		tlsConn,                   // io.Reader
-		tlsConn,                   // io.Writer
-		tlsConn,                   // io.Closer
-		c.model,
-		&tlsConnInfo{tlsConn, addr},
+		tlsConn, tlsConn, tlsConn,
+		model,
+		&tlsConnInfo{conn: tlsConn, addr: addr, establishedAt: time.Now()},
 		protocol.CompressionMetadata,
-		nil,  // folder passwords
-		nil,  // key generator
+		nil, nil,
 	)
-	c.conn.Start()
+	conn.Start()
+	// Advertise our cluster config so the peer sends its Index.
+	// Folder.Devices MUST include both our ID and the peer's ID,
+	// otherwise the peer rejects with errMissingLocalInClusterConfig.
+	conn.ClusterConfig(buildClusterConfig(c.myID, peerID, folders))
 
-	// Advertise the same folders back so the peer sends us their index.
-	c.conn.ClusterConfig(buildClusterConfig(c.myID, folders))
+	c.conn = conn
+	c.model = model
 	return nil
 }
 
-// WaitForIndex blocks until the file index for folderID has been received from
-// the peer, or until timeoutSecs seconds elapse. Call this before ListFolder.
+// WaitForIndex blocks until the file index for folderID has settled (no more
+// updates for a short quiet period) or until timeoutSecs seconds elapse.
+// Returns successfully with whatever partial index has arrived if the timeout
+// is reached but at least some data was received.
 func (c *Client) WaitForIndex(folderID string, timeoutSecs int) error {
-	if c.model == nil {
+	_, model := c.snapshot()
+	if model == nil {
 		return fmt.Errorf("not connected")
 	}
-	return c.model.waitForIndex(folderID, time.Duration(timeoutSecs)*time.Second)
+	return model.waitForIndex(folderID, time.Duration(timeoutSecs)*time.Second)
 }
 
-// Close shuts down the connection cleanly.
+// Close shuts down the connection. Safe to call multiple times.
 func (c *Client) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.conn != nil {
 		c.conn.Close(nil)
+		c.conn = nil
+		c.model = nil
 	}
+}
+
+// snapshot returns the current connection and model atomically.
+func (c *Client) snapshot() (protocol.Connection, *peerModel) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn, c.model
 }
 
 func verifyPeerDeviceID(conn *tls.Conn, expected protocol.DeviceID) error {
@@ -131,12 +184,16 @@ func splitFolderIDs(s string) []string {
 	return out
 }
 
-func buildClusterConfig(myID protocol.DeviceID, folderIDs []string) protocol.ClusterConfig {
+func buildClusterConfig(myID, peerID protocol.DeviceID, folderIDs []string) protocol.ClusterConfig {
 	folders := make([]protocol.Folder, len(folderIDs))
 	for i, id := range folderIDs {
 		folders[i] = protocol.Folder{
-			ID:      id,
-			Devices: []protocol.Device{{ID: myID}},
+			ID: id,
+			// Both devices must appear in Devices, or the peer rejects.
+			Devices: []protocol.Device{
+				{ID: myID},
+				{ID: peerID},
+			},
 		}
 	}
 	return protocol.ClusterConfig{Folders: folders}
@@ -144,16 +201,17 @@ func buildClusterConfig(myID protocol.DeviceID, folderIDs []string) protocol.Clu
 
 // tlsConnInfo implements protocol.ConnectionInfo for a raw TLS connection.
 type tlsConnInfo struct {
-	conn *tls.Conn
-	addr string
+	conn          *tls.Conn
+	addr          string
+	establishedAt time.Time
 }
 
-func (i *tlsConnInfo) Type() string            { return "tcp" }
-func (i *tlsConnInfo) Transport() string       { return "tcp" }
-func (i *tlsConnInfo) IsLocal() bool           { return false }
-func (i *tlsConnInfo) RemoteAddr() net.Addr    { return i.conn.RemoteAddr() }
-func (i *tlsConnInfo) Priority() int           { return 0 }
-func (i *tlsConnInfo) String() string          { return i.addr }
-func (i *tlsConnInfo) Crypto() string          { return "tls" }
-func (i *tlsConnInfo) EstablishedAt() time.Time { return time.Now() }
-func (i *tlsConnInfo) ConnectionID() string    { return i.addr }
+func (i *tlsConnInfo) Type() string             { return "tcp" }
+func (i *tlsConnInfo) Transport() string        { return "tcp" }
+func (i *tlsConnInfo) IsLocal() bool            { return false }
+func (i *tlsConnInfo) RemoteAddr() net.Addr     { return i.conn.RemoteAddr() }
+func (i *tlsConnInfo) Priority() int            { return 0 }
+func (i *tlsConnInfo) String() string           { return i.addr }
+func (i *tlsConnInfo) Crypto() string           { return "tls" }
+func (i *tlsConnInfo) EstablishedAt() time.Time { return i.establishedAt }
+func (i *tlsConnInfo) ConnectionID() string     { return i.addr }

@@ -12,30 +12,33 @@ import com.acidtv.unsyncthing.stclient.Stclient
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import com.google.gson.reflect.TypeToken
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.File
 
+// Mirrors the Go FileEntry struct. encoding/json emits the Go field names
+// verbatim (PascalCase), so @SerializedName is required — Gson is
+// case-sensitive by default.
 data class FileEntry(
-    val name: String,
-    val path: String,
-    val size: Long,
-    val modified: Long,
-    val isDir: Boolean,
+    @SerializedName("Name")     val name: String,
+    @SerializedName("Path")     val path: String,
+    @SerializedName("Size")     val size: Long,
+    @SerializedName("Modified") val modified: Long,
+    @SerializedName("IsDir")    val isDir: Boolean,
 )
 
 sealed class UiState {
     object Idle : UiState()
     object Connecting : UiState()
-    data class Connected(val folderID: String) : UiState()
     data class FileList(val folderID: String, val entries: List<FileEntry>) : UiState()
-    data class Downloading(val path: String, val downloaded: Long, val total: Long) : UiState()
     data class Error(val message: String) : UiState()
 }
 
-// Mirrors the Go CertResult JSON struct (uppercase field names).
-private data class CertResult(
+data class DownloadProgress(val path: String, val downloaded: Long, val total: Long)
+
+private data class CertData(
     @SerializedName("CertPEM")  val certPEM: String,
     @SerializedName("KeyPEM")   val keyPEM: String,
     @SerializedName("DeviceID") val deviceID: String,
@@ -45,98 +48,154 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
 
     private val prefs = app.getSharedPreferences("unsyncthing", Context.MODE_PRIVATE)
     private val gson = Gson()
+
+    // All client/cert mutation goes through `lock`.
+    private val lock = Any()
     private var client: Client? = null
+    private var cert: CertData? = null
+    private var downloadJob: Job? = null
 
     private val _state = MutableLiveData<UiState>(UiState.Idle)
     val state: LiveData<UiState> = _state
 
-    /** Our device ID — display this so the user can add it in the remote Syncthing UI. */
-    val deviceID: String get() = client?.deviceID() ?: loadOrCreateCert().deviceID
+    // Active download progress, or null when idle. Kept separate from `state`
+    // so the FileList isn't replaced during a download (which would prevent
+    // the user from opening another file).
+    private val _download = MutableLiveData<DownloadProgress?>(null)
+    val download: LiveData<DownloadProgress?> = _download
+
+    // Null while the cert is being generated on first launch.
+    private val _deviceID = MutableLiveData<String?>(null)
+    val deviceID: LiveData<String?> = _deviceID
+
+    init {
+        // Generate the cert off the main thread so the very first launch
+        // doesn't ANR on ECDSA P-384 keygen.
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val c = ensureCert()
+                _deviceID.postValue(c.deviceID)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.postValue(UiState.Error("Failed to initialise: ${e.message}"))
+            }
+        }
+    }
 
     fun connect(addr: String, peerDeviceID: String, folderID: String) {
         _state.value = UiState.Connecting
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val cert = loadOrCreateCert()
-                val c = Client(cert.certPEM, cert.keyPEM)
-                c.connect(addr, peerDeviceID, folderID)
-                c.waitForIndex(folderID, 30)
-                client = c
-                withContext(Dispatchers.Main) {
-                    _state.value = UiState.Connected(folderID)
+                val c = ensureCert()
+                val newClient = Client(c.certPEM, c.keyPEM)
+                newClient.connect(addr, peerDeviceID, folderID)
+                newClient.waitForIndex(folderID, 30)
+
+                val json = String(newClient.listFolder(folderID))
+                val type = object : TypeToken<List<FileEntry>>() {}.type
+                val entries: List<FileEntry> = gson.fromJson(json, type) ?: emptyList()
+
+                synchronized(lock) {
+                    client?.close()
+                    client = newClient
                 }
-                loadFileList(c, folderID)
+
+                _state.postValue(
+                    UiState.FileList(
+                        folderID,
+                        entries.sortedWith(compareByDescending<FileEntry> { it.isDir }.thenBy { it.name })
+                    )
+                )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    _state.value = UiState.Error(e.message ?: "Connection failed")
-                }
+                _state.postValue(UiState.Error(e.message ?: "Connection failed"))
             }
         }
     }
 
     fun fetchFile(folderID: String, filePath: String) {
-        val c = client ?: return
-        viewModelScope.launch(Dispatchers.IO) {
-            val dest = File(getApplication<Application>().cacheDir, filePath.substringAfterLast('/'))
+        // Ignore taps while a download is already running.
+        if (downloadJob?.isActive == true) return
+        val c = synchronized(lock) { client } ?: return
+
+        downloadJob = viewModelScope.launch(Dispatchers.IO) {
+            val cacheDir = getApplication<Application>().cacheDir
+            val dest = File(cacheDir, sanitizeFilename(filePath))
             try {
+                // Defence in depth against a peer-controlled filePath escaping cacheDir.
+                if (!dest.canonicalPath.startsWith(cacheDir.canonicalPath + File.separator)) {
+                    throw SecurityException("refusing to write outside cache directory")
+                }
                 c.fetchFile(folderID, filePath, dest.absolutePath, object : FetchProgress {
                     override fun onProgress(downloaded: Long, total: Long) {
-                        _state.postValue(UiState.Downloading(filePath, downloaded, total))
+                        _download.postValue(DownloadProgress(filePath, downloaded, total))
                     }
                     override fun onDone(localPath: String) {
-                        // TODO: open the file with an external app via FileProvider
-                        _state.postValue(UiState.Connected(folderID))
+                        _download.postValue(null)
+                        // TODO: open the file via FileProvider
                     }
                     override fun onError(msg: String) {
+                        _download.postValue(null)
                         _state.postValue(UiState.Error(msg))
                     }
                 })
+            } catch (e: CancellationException) {
+                _download.postValue(null)
+                throw e
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    _state.value = UiState.Error(e.message ?: "Download failed")
-                }
+                _download.postValue(null)
+                _state.postValue(UiState.Error(e.message ?: "Download failed"))
             }
         }
     }
 
     fun disconnect() {
-        client?.close()
-        client = null
+        synchronized(lock) {
+            client?.close()
+            client = null
+        }
         _state.value = UiState.Idle
+        _download.value = null
     }
 
     override fun onCleared() {
-        disconnect()
-    }
-
-    private suspend fun loadFileList(c: Client, folderID: String) {
-        // listFolder returns ByteArray (JSON-encoded []FileEntry from Go)
-        val json = String(c.listFolder(folderID))
-        val type = object : TypeToken<List<FileEntry>>() {}.type
-        val entries: List<FileEntry> = gson.fromJson(json, type)
-        withContext(Dispatchers.Main) {
-            _state.value = UiState.FileList(
-                folderID,
-                entries.sortedWith(compareByDescending<FileEntry> { it.isDir }.thenBy { it.name }),
-            )
+        synchronized(lock) {
+            client?.close()
+            client = null
         }
     }
 
-    /** Loads saved cert from SharedPrefs, generating and persisting new ones on first run. */
-    private fun loadOrCreateCert(): CertResult {
-        val savedCert = prefs.getString("certPEM", null)
-        val savedKey  = prefs.getString("keyPEM", null)
-        val savedID   = prefs.getString("deviceID", null)
-        if (savedCert != null && savedKey != null && savedID != null) {
-            return CertResult(savedCert, savedKey, savedID)
+    private fun ensureCert(): CertData {
+        synchronized(lock) {
+            cert?.let { return it }
+            val savedCert = prefs.getString("certPEM",  null)
+            val savedKey  = prefs.getString("keyPEM",   null)
+            val savedID   = prefs.getString("deviceID", null)
+            if (savedCert != null && savedKey != null && savedID != null) {
+                val c = CertData(savedCert, savedKey, savedID)
+                cert = c
+                return c
+            }
+            val result = gson.fromJson(String(Stclient.generateCert()), CertData::class.java)
+            prefs.edit()
+                .putString("certPEM",  result.certPEM)
+                .putString("keyPEM",   result.keyPEM)
+                .putString("deviceID", result.deviceID)
+                .apply()
+            cert = result
+            return result
         }
-        // generateCert returns ByteArray (JSON-encoded CertResult from Go)
-        val result = gson.fromJson(String(Stclient.generateCert()), CertResult::class.java)
-        prefs.edit()
-            .putString("certPEM",   result.certPEM)
-            .putString("keyPEM",    result.keyPEM)
-            .putString("deviceID",  result.deviceID)
-            .apply()
-        return result
+    }
+
+    private fun sanitizeFilename(filePath: String): String {
+        val basename = filePath.substringAfterLast('/').substringAfterLast('\\')
+        val cleaned = basename.filter { it.isLetterOrDigit() || it in "._-" }
+        return when {
+            cleaned.isBlank() -> "download"
+            cleaned == "." || cleaned == ".." -> "download"
+            else -> cleaned
+        }
     }
 }

@@ -16,15 +16,17 @@ type FileEntry struct {
 }
 
 // ListFolder returns a JSON array of FileEntry for all non-deleted items in
-// folderID. Call WaitForIndex first.
+// folderID. Call WaitForIndex first. An empty folder returns "[]", not an
+// error (only "folder not in index" produces an error).
 func (c *Client) ListFolder(folderID string) ([]byte, error) {
-	if c.model == nil {
+	_, model := c.snapshot()
+	if model == nil {
 		return nil, fmt.Errorf("not connected")
 	}
-	files := c.model.files(folderID)
-	if files == nil {
+	if !model.folderKnown(folderID) {
 		return nil, fmt.Errorf("index for folder %q not yet received", folderID)
 	}
+	files := model.files(folderID)
 
 	entries := make([]FileEntry, 0, len(files))
 	for _, f := range files {
