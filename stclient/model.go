@@ -93,7 +93,10 @@ func (m *peerModel) waitForIndex(folderID string, timeout time.Duration) error {
 			if haveAny {
 				return nil // partial is better than nothing
 			}
-			return fmt.Errorf("timeout waiting for index of folder %q", folderID)
+			return fmt.Errorf("timeout waiting for index of folder %q — "+
+					"check that (1) this device has been added and accepted in the peer's Syncthing web UI, "+
+					"(2) the folder is shared with this device on the peer, and "+
+					"(3) the folder ID matches exactly", folderID)
 		}
 		time.Sleep(pollPeriod)
 	}
