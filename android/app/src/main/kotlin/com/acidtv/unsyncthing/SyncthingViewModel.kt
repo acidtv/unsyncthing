@@ -32,7 +32,38 @@ data class FileEntry(
 sealed class UiState {
     object Idle : UiState()
     object Connecting : UiState()
-    data class FileList(val folderID: String, val entries: List<FileEntry>) : UiState()
+    data class FileList(
+        val folderID: String,
+        val allEntries: List<FileEntry>,
+        val currentDir: String = "",
+    ) : UiState() {
+        val entries: List<FileEntry> get() {
+            val prefix = if (currentDir.isEmpty()) "" else "$currentDir/"
+            // Use a map keyed by the immediate child name so each name appears once.
+            val seen = mutableMapOf<String, FileEntry>()
+            for (entry in allEntries) {
+                val relative = if (prefix.isEmpty()) entry.path
+                               else if (entry.path.startsWith(prefix)) entry.path.removePrefix(prefix)
+                               else continue
+                val slash = relative.indexOf('/')
+                if (slash == -1) {
+                    // Direct child at this level — use its real entry.
+                    seen.getOrPut(relative) { entry }
+                } else {
+                    // File lives deeper: ensure the immediate subdirectory is visible.
+                    // Syncthing doesn't always send explicit directory FileInfo entries,
+                    // so synthesize one from the path if we haven't seen a real one yet.
+                    val dirName = relative.substring(0, slash)
+                    val dirPath = "$prefix$dirName"
+                    seen.getOrPut(dirName) {
+                        allEntries.find { it.path == dirPath && it.isDir }
+                            ?: FileEntry(dirName, dirPath, 0L, 0L, true)
+                    }
+                }
+            }
+            return seen.values.sortedWith(compareByDescending<FileEntry> { it.isDir }.thenBy { it.name })
+        }
+    }
     data class Error(val message: String) : UiState()
 }
 
@@ -83,7 +114,19 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun savedConnection(): Triple<String, String, String>? {
+        val addr   = prefs.getString("lastAddr",   null) ?: return null
+        val peerID = prefs.getString("lastPeerID", null) ?: return null
+        val folder = prefs.getString("lastFolder", null) ?: return null
+        return Triple(addr, peerID, folder)
+    }
+
     fun connect(addr: String, peerDeviceID: String, folderID: String) {
+        prefs.edit()
+            .putString("lastAddr",   addr)
+            .putString("lastPeerID", peerDeviceID)
+            .putString("lastFolder", folderID)
+            .apply()
         _state.value = UiState.Connecting
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -101,12 +144,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                     client = newClient
                 }
 
-                _state.postValue(
-                    UiState.FileList(
-                        folderID,
-                        entries.sortedWith(compareByDescending<FileEntry> { it.isDir }.thenBy { it.name })
-                    )
-                )
+                _state.postValue(UiState.FileList(folderID, entries))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -149,6 +187,38 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 _state.postValue(UiState.Error(e.message ?: "Download failed"))
             }
         }
+    }
+
+    fun refreshListing() {
+        val current = _state.value as? UiState.FileList ?: return
+        val c = synchronized(lock) { client } ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val json = String(c.listFolder(current.folderID))
+                val type = object : TypeToken<List<FileEntry>>() {}.type
+                val entries: List<FileEntry> = gson.fromJson(json, type) ?: emptyList()
+                _state.postValue(current.copy(allEntries = entries))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.postValue(UiState.Error(e.message ?: "Refresh failed"))
+            }
+        }
+    }
+
+    fun navigateInto(dirPath: String) {
+        val state = _state.value
+        if (state is UiState.FileList) _state.value = state.copy(currentDir = dirPath)
+    }
+
+    fun navigateUp(): Boolean {
+        val state = _state.value
+        if (state is UiState.FileList && state.currentDir.isNotEmpty()) {
+            val parent = state.currentDir.substringBeforeLast('/', "")
+            _state.value = state.copy(currentDir = parent)
+            return true
+        }
+        return false
     }
 
     fun disconnect() {

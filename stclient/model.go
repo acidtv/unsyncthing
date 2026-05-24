@@ -76,7 +76,7 @@ func (m *peerModel) DownloadProgress(_ protocol.Connection, _ *protocol.Download
 // IndexUpdate batches, so we cannot return on the first message alone.
 func (m *peerModel) waitForIndex(folderID string, timeout time.Duration) error {
 	const (
-		quiet      = 1 * time.Second
+		quiet      = 3 * time.Second
 		pollPeriod = 100 * time.Millisecond
 	)
 	deadline := time.Now().Add(timeout)

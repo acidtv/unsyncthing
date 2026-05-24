@@ -21,7 +21,10 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         adapter = FileListAdapter { entry ->
-            if (entry.isDir) return@FileListAdapter
+            if (entry.isDir) {
+                vm.navigateInto(entry.path)
+                return@FileListAdapter
+            }
             val state = vm.state.value
             if (state is UiState.FileList) {
                 vm.fetchFile(state.folderID, entry.path)
@@ -33,6 +36,14 @@ class MainActivity : AppCompatActivity() {
             addItemDecoration(DividerItemDecoration(this@MainActivity, DividerItemDecoration.VERTICAL))
             adapter = this@MainActivity.adapter
         }
+
+        vm.savedConnection()?.let { (addr, peerID, folder) ->
+            binding.etAddr.setText(addr)
+            binding.etPeerID.setText(peerID)
+            binding.etFolder.setText(folder)
+        }
+
+        binding.btnRefresh.setOnClickListener { vm.refreshListing() }
 
         binding.btnConnect.setOnClickListener {
             val addr = binding.etAddr.text.toString().trim()
@@ -54,23 +65,27 @@ class MainActivity : AppCompatActivity() {
             when (state) {
                 is UiState.Idle -> {
                     binding.connectForm.visibility = View.VISIBLE
+                    binding.btnRefresh.visibility = View.GONE
                     refreshConnectButton()
                     if (vm.download.value == null) binding.tvStatus.text = ""
                 }
                 is UiState.Connecting -> {
                     binding.connectForm.visibility = View.VISIBLE
+                    binding.btnRefresh.visibility = View.GONE
                     binding.btnConnect.isEnabled = false
                     binding.tvStatus.text = "Connecting…"
                 }
                 is UiState.FileList -> {
                     binding.connectForm.visibility = View.GONE
+                    binding.btnRefresh.visibility = View.VISIBLE
                     adapter.submitList(state.entries)
                     if (vm.download.value == null) {
-                        binding.tvStatus.text = "${state.folderID}  (${state.entries.size} items)"
+                        binding.tvStatus.text = statusText(state)
                     }
                 }
                 is UiState.Error -> {
                     binding.connectForm.visibility = View.VISIBLE
+                    binding.btnRefresh.visibility = View.GONE
                     refreshConnectButton()
                     binding.tvStatus.text = ""
                     Toast.makeText(this, state.message, Toast.LENGTH_LONG).show()
@@ -85,13 +100,24 @@ class MainActivity : AppCompatActivity() {
             } else {
                 val state = vm.state.value
                 if (state is UiState.FileList) {
-                    binding.tvStatus.text = "${state.folderID}  (${state.entries.size} items)"
+                    binding.tvStatus.text = statusText(state)
                 }
             }
         }
     }
 
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (!vm.navigateUp()) @Suppress("DEPRECATION") super.onBackPressed()
+    }
+
     private fun refreshConnectButton() {
         binding.btnConnect.isEnabled = vm.deviceID.value != null
+    }
+
+    private fun statusText(state: UiState.FileList): String {
+        val path = if (state.currentDir.isEmpty()) state.folderID
+                   else "${state.folderID}/${state.currentDir}"
+        return "$path  (${state.entries.size} items)"
     }
 }
