@@ -21,7 +21,10 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         adapter = FileListAdapter { entry ->
-            if (entry.isDir) return@FileListAdapter
+            if (entry.isDir) {
+                vm.navigateInto(entry.path)
+                return@FileListAdapter
+            }
             val state = vm.state.value
             if (state is UiState.FileList) {
                 vm.fetchFile(state.folderID, entry.path)
@@ -66,7 +69,7 @@ class MainActivity : AppCompatActivity() {
                     binding.connectForm.visibility = View.GONE
                     adapter.submitList(state.entries)
                     if (vm.download.value == null) {
-                        binding.tvStatus.text = "${state.folderID}  (${state.entries.size} items)"
+                        binding.tvStatus.text = statusText(state)
                     }
                 }
                 is UiState.Error -> {
@@ -85,13 +88,24 @@ class MainActivity : AppCompatActivity() {
             } else {
                 val state = vm.state.value
                 if (state is UiState.FileList) {
-                    binding.tvStatus.text = "${state.folderID}  (${state.entries.size} items)"
+                    binding.tvStatus.text = statusText(state)
                 }
             }
         }
     }
 
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (!vm.navigateUp()) @Suppress("DEPRECATION") super.onBackPressed()
+    }
+
     private fun refreshConnectButton() {
         binding.btnConnect.isEnabled = vm.deviceID.value != null
+    }
+
+    private fun statusText(state: UiState.FileList): String {
+        val path = if (state.currentDir.isEmpty()) state.folderID
+                   else "${state.folderID}/${state.currentDir}"
+        return "$path  (${state.entries.size} items)"
     }
 }

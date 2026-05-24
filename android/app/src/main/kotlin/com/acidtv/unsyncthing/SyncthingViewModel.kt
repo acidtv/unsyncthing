@@ -32,7 +32,23 @@ data class FileEntry(
 sealed class UiState {
     object Idle : UiState()
     object Connecting : UiState()
-    data class FileList(val folderID: String, val entries: List<FileEntry>) : UiState()
+    data class FileList(
+        val folderID: String,
+        val allEntries: List<FileEntry>,
+        val currentDir: String = "",
+    ) : UiState() {
+        val entries: List<FileEntry> get() {
+            val children = allEntries.filter { entry ->
+                if (currentDir.isEmpty()) {
+                    !entry.path.contains('/')
+                } else {
+                    entry.path.startsWith("$currentDir/") &&
+                        !entry.path.removePrefix("$currentDir/").contains('/')
+                }
+            }
+            return children.sortedWith(compareByDescending<FileEntry> { it.isDir }.thenBy { it.name })
+        }
+    }
     data class Error(val message: String) : UiState()
 }
 
@@ -101,12 +117,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                     client = newClient
                 }
 
-                _state.postValue(
-                    UiState.FileList(
-                        folderID,
-                        entries.sortedWith(compareByDescending<FileEntry> { it.isDir }.thenBy { it.name })
-                    )
-                )
+                _state.postValue(UiState.FileList(folderID, entries))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -149,6 +160,21 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 _state.postValue(UiState.Error(e.message ?: "Download failed"))
             }
         }
+    }
+
+    fun navigateInto(dirPath: String) {
+        val state = _state.value
+        if (state is UiState.FileList) _state.value = state.copy(currentDir = dirPath)
+    }
+
+    fun navigateUp(): Boolean {
+        val state = _state.value
+        if (state is UiState.FileList && state.currentDir.isNotEmpty()) {
+            val parent = state.currentDir.substringBeforeLast('/', "")
+            _state.value = state.copy(currentDir = parent)
+            return true
+        }
+        return false
     }
 
     fun disconnect() {
