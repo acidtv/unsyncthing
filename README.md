@@ -127,6 +127,7 @@ The app connects directly to one of your existing Syncthing nodes (a NAS, home s
 | `gomobile: command not found` | `$GOPATH/bin` not on PATH — add `export PATH=$PATH:$(go env GOPATH)/bin` |
 | `gomobile: ANDROID_NDK_HOME not set` | export it (see step 4 above) |
 | `Plugin com.android.application … not found` | `maven.google.com` unreachable — check your network/proxy |
+| `adb: no permissions` on Linux | missing udev rules — run `sudo apt install android-sdk-platform-tools` (ships pre-made rules for common vendors), then unplug and replug |
 | App says *"timeout waiting for index"* | folder ID typo, or the peer hasn't shared that folder with this device yet |
 | *"device ID mismatch"* | the peer device ID was mistyped, or you're talking to the wrong host |
 
