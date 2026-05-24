@@ -189,6 +189,23 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun refreshListing() {
+        val current = _state.value as? UiState.FileList ?: return
+        val c = synchronized(lock) { client } ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val json = String(c.listFolder(current.folderID))
+                val type = object : TypeToken<List<FileEntry>>() {}.type
+                val entries: List<FileEntry> = gson.fromJson(json, type) ?: emptyList()
+                _state.postValue(current.copy(allEntries = entries))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.postValue(UiState.Error(e.message ?: "Refresh failed"))
+            }
+        }
+    }
+
     fun navigateInto(dirPath: String) {
         val state = _state.value
         if (state is UiState.FileList) _state.value = state.copy(currentDir = dirPath)

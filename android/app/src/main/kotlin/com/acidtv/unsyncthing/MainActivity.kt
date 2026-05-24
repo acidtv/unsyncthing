@@ -43,6 +43,8 @@ class MainActivity : AppCompatActivity() {
             binding.etFolder.setText(folder)
         }
 
+        binding.btnRefresh.setOnClickListener { vm.refreshListing() }
+
         binding.btnConnect.setOnClickListener {
             val addr = binding.etAddr.text.toString().trim()
             val peerID = binding.etPeerID.text.toString().trim()
@@ -63,16 +65,19 @@ class MainActivity : AppCompatActivity() {
             when (state) {
                 is UiState.Idle -> {
                     binding.connectForm.visibility = View.VISIBLE
+                    binding.btnRefresh.visibility = View.GONE
                     refreshConnectButton()
                     if (vm.download.value == null) binding.tvStatus.text = ""
                 }
                 is UiState.Connecting -> {
                     binding.connectForm.visibility = View.VISIBLE
+                    binding.btnRefresh.visibility = View.GONE
                     binding.btnConnect.isEnabled = false
                     binding.tvStatus.text = "Connecting…"
                 }
                 is UiState.FileList -> {
                     binding.connectForm.visibility = View.GONE
+                    binding.btnRefresh.visibility = View.VISIBLE
                     adapter.submitList(state.entries)
                     if (vm.download.value == null) {
                         binding.tvStatus.text = statusText(state)
@@ -80,6 +85,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 is UiState.Error -> {
                     binding.connectForm.visibility = View.VISIBLE
+                    binding.btnRefresh.visibility = View.GONE
                     refreshConnectButton()
                     binding.tvStatus.text = ""
                     Toast.makeText(this, state.message, Toast.LENGTH_LONG).show()
