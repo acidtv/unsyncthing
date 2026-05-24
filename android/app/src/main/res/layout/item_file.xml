@@ -23,14 +23,15 @@
             android:id="@+id/tvName"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textAppearance="?attr/textAppearanceTitleMedium"
+            android:textSize="20sp"
+            android:textColor="?attr/colorOnSurface"
             android:singleLine="true" />
 
         <TextView
             android:id="@+id/tvMeta"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textAppearance="?attr/textAppearanceBodyMedium" />
+            android:textSize="14sp" />
 
     </LinearLayout>
 
