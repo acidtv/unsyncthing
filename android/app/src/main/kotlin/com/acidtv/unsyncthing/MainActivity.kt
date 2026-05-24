@@ -37,6 +37,12 @@ class MainActivity : AppCompatActivity() {
             adapter = this@MainActivity.adapter
         }
 
+        vm.savedConnection()?.let { (addr, peerID, folder) ->
+            binding.etAddr.setText(addr)
+            binding.etPeerID.setText(peerID)
+            binding.etFolder.setText(folder)
+        }
+
         binding.btnConnect.setOnClickListener {
             val addr = binding.etAddr.text.toString().trim()
             val peerID = binding.etPeerID.text.toString().trim()

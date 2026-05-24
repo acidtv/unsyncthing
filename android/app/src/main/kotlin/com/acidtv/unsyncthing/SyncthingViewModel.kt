@@ -114,7 +114,19 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun savedConnection(): Triple<String, String, String>? {
+        val addr   = prefs.getString("lastAddr",   null) ?: return null
+        val peerID = prefs.getString("lastPeerID", null) ?: return null
+        val folder = prefs.getString("lastFolder", null) ?: return null
+        return Triple(addr, peerID, folder)
+    }
+
     fun connect(addr: String, peerDeviceID: String, folderID: String) {
+        prefs.edit()
+            .putString("lastAddr",   addr)
+            .putString("lastPeerID", peerDeviceID)
+            .putString("lastFolder", folderID)
+            .apply()
         _state.value = UiState.Connecting
         viewModelScope.launch(Dispatchers.IO) {
             try {
