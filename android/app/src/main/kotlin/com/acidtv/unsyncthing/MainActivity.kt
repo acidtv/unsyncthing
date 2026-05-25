@@ -1,5 +1,8 @@
 package com.acidtv.unsyncthing
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.view.View
 import android.widget.Toast
@@ -8,6 +11,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.DividerItemDecoration
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.acidtv.unsyncthing.databinding.ActivityMainBinding
+import com.google.android.material.snackbar.Snackbar
 
 class MainActivity : AppCompatActivity() {
 
@@ -103,6 +107,26 @@ class MainActivity : AppCompatActivity() {
                     binding.tvStatus.text = statusText(state)
                 }
             }
+        }
+
+        vm.completed.observe(this) { done ->
+            if (done == null) return@observe
+            Snackbar.make(binding.root, "Saved to Downloads/${done.displayName}", Snackbar.LENGTH_LONG)
+                .setAction("Open") { openFile(done.uri, done.mimeType) }
+                .show()
+            vm.acknowledgeCompletion()
+        }
+    }
+
+    private fun openFile(uri: Uri, mimeType: String) {
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mimeType)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivity(Intent.createChooser(intent, "Open with…"))
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(this, "No app can open this file", Toast.LENGTH_SHORT).show()
         }
     }
 

@@ -1,7 +1,11 @@
 package com.acidtv.unsyncthing
 
 import android.app.Application
+import android.content.ContentValues
 import android.content.Context
+import android.net.Uri
+import android.provider.MediaStore
+import android.webkit.MimeTypeMap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
@@ -69,6 +73,8 @@ sealed class UiState {
 
 data class DownloadProgress(val path: String, val downloaded: Long, val total: Long)
 
+data class DownloadCompleted(val displayName: String, val uri: Uri, val mimeType: String)
+
 private data class CertData(
     @SerializedName("CertPEM")  val certPEM: String,
     @SerializedName("KeyPEM")   val keyPEM: String,
@@ -94,6 +100,11 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     // the user from opening another file).
     private val _download = MutableLiveData<DownloadProgress?>(null)
     val download: LiveData<DownloadProgress?> = _download
+
+    // Single-shot completion event. The Activity calls acknowledgeCompletion()
+    // after consuming it so a config change doesn't re-fire the Snackbar.
+    private val _completed = MutableLiveData<DownloadCompleted?>(null)
+    val completed: LiveData<DownloadCompleted?> = _completed
 
     // Null while the cert is being generated on first launch.
     private val _deviceID = MutableLiveData<String?>(null)
@@ -166,13 +177,30 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 if (!dest.canonicalPath.startsWith(cacheDir.canonicalPath + File.separator)) {
                     throw SecurityException("refusing to write outside cache directory")
                 }
+                // BEP connections can be dropped between downloads (peer idle timeout,
+                // NAT churn). Reconnect transparently before fetching so the user
+                // doesn't hit "connection closed" on the second tap.
+                if (!c.isConnected) {
+                    val saved = savedConnection()
+                        ?: throw IllegalStateException("connection lost; please reconnect")
+                    val (addr, peerID, folder) = saved
+                    c.connect(addr, peerID, folder)
+                    c.waitForIndex(folder, 30)
+                }
                 c.fetchFile(folderID, filePath, dest.absolutePath, object : FetchProgress {
                     override fun onProgress(downloaded: Long, total: Long) {
                         _download.postValue(DownloadProgress(filePath, downloaded, total))
                     }
                     override fun onDone(localPath: String) {
-                        _download.postValue(null)
-                        // TODO: open the file via FileProvider
+                        try {
+                            val result = copyToDownloads(File(localPath), sanitizeFilename(filePath))
+                            _completed.postValue(result)
+                        } catch (e: Exception) {
+                            _state.postValue(UiState.Error("Save to Downloads failed: ${e.message}"))
+                        } finally {
+                            File(localPath).delete()
+                            _download.postValue(null)
+                        }
                     }
                     override fun onError(msg: String) {
                         _download.postValue(null)
@@ -257,6 +285,43 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
             cert = result
             return result
         }
+    }
+
+    fun acknowledgeCompletion() {
+        _completed.value = null
+    }
+
+    private fun copyToDownloads(src: File, displayName: String): DownloadCompleted {
+        val mime = MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(src.extension.lowercase())
+            ?: "application/octet-stream"
+
+        val resolver = getApplication<Application>().contentResolver
+        val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+            put(MediaStore.Downloads.MIME_TYPE, mime)
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+
+        val uri = resolver.insert(collection, values)
+            ?: throw IllegalStateException("MediaStore refused the insert")
+
+        try {
+            resolver.openOutputStream(uri).use { out ->
+                requireNotNull(out) { "openOutputStream returned null" }
+                src.inputStream().use { it.copyTo(out) }
+            }
+            values.clear()
+            values.put(MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+        } catch (e: Exception) {
+            // Roll back the pending row so it doesn't litter Downloads.
+            runCatching { resolver.delete(uri, null, null) }
+            throw e
+        }
+
+        return DownloadCompleted(displayName, uri, mime)
     }
 
     private fun sanitizeFilename(filePath: String): String {

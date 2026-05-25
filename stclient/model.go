@@ -14,6 +14,7 @@ type peerModel struct {
 	mu         sync.RWMutex
 	folders    map[string][]protocol.FileInfo
 	lastUpdate map[string]time.Time // when Index/IndexUpdate last touched the folder
+	onClosed   func(error)          // optional callback fired from Closed()
 }
 
 func newPeerModel() *peerModel {
@@ -21,6 +22,12 @@ func newPeerModel() *peerModel {
 		folders:    make(map[string][]protocol.FileInfo),
 		lastUpdate: make(map[string]time.Time),
 	}
+}
+
+func (m *peerModel) setOnClosed(cb func(error)) {
+	m.mu.Lock()
+	m.onClosed = cb
+	m.mu.Unlock()
 }
 
 func (m *peerModel) Index(_ protocol.Connection, idx *protocol.Index) error {
@@ -63,7 +70,14 @@ func (m *peerModel) ClusterConfig(_ protocol.Connection, _ *protocol.ClusterConf
 	return nil
 }
 
-func (m *peerModel) Closed(_ protocol.Connection, _ error) {}
+func (m *peerModel) Closed(_ protocol.Connection, err error) {
+	m.mu.RLock()
+	cb := m.onClosed
+	m.mu.RUnlock()
+	if cb != nil {
+		cb(err)
+	}
+}
 
 func (m *peerModel) DownloadProgress(_ protocol.Connection, _ *protocol.DownloadProgress) error {
 	return nil

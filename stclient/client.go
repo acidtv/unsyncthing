@@ -113,6 +113,22 @@ func (c *Client) Connect(addr, peerDeviceIDStr, folderIDs string) error {
 
 	folders := splitFolderIDs(folderIDs)
 	model := newPeerModel()
+	// When the BEP connection dies (peer idle timeout, NAT churn, network blip)
+	// the protocol package calls Closed() on the model. Clear our reference so
+	// the next FetchFile sees IsConnected()==false and can trigger a reconnect
+	// instead of trying to use a dead conn and surfacing "connection closed".
+	// Done from a goroutine so we never deadlock if Closed fires while Close()
+	// is being driven from a code path that already holds c.mu.
+	model.setOnClosed(func(_ error) {
+		go func() {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if c.model == model {
+				c.conn = nil
+				c.model = nil
+			}
+		}()
+	})
 	conn := protocol.NewConnection(
 		peerID,
 		tlsConn, tlsConn, tlsConn,
@@ -142,6 +158,14 @@ func (c *Client) WaitForIndex(folderID string, timeoutSecs int) error {
 		return fmt.Errorf("not connected")
 	}
 	return model.waitForIndex(folderID, time.Duration(timeoutSecs)*time.Second)
+}
+
+// IsConnected reports whether the BEP connection is currently live.
+// Returns false after Close() or once the peer (or the network) has dropped us.
+func (c *Client) IsConnected() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn != nil
 }
 
 // Close shuts down the connection. Safe to call multiple times.
