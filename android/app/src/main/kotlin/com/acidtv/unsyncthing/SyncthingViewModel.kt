@@ -164,12 +164,12 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun fetchFile(folderID: String, filePath: String) {
-        // Ignore taps while a download is already running.
-        if (downloadJob?.isActive == true) return
-        val c = synchronized(lock) { client } ?: return
+    fun fetchFile(folderID: String, filePath: String): Boolean {
+        if (downloadJob?.isActive == true) return false
+        val c = synchronized(lock) { client } ?: return false
 
         downloadJob = viewModelScope.launch(Dispatchers.IO) {
+            _download.postValue(DownloadProgress(filePath, 0, -1))
             val cacheDir = getApplication<Application>().cacheDir
             val dest = File(cacheDir, sanitizeFilename(filePath))
             try {
@@ -215,6 +215,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 _state.postValue(UiState.Error(e.message ?: "Download failed"))
             }
         }
+        return true
     }
 
     fun refreshListing() {
