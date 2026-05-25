@@ -31,7 +31,9 @@ class MainActivity : AppCompatActivity() {
             }
             val state = vm.state.value
             if (state is UiState.FileList) {
-                vm.fetchFile(state.folderID, entry.path)
+                if (!vm.fetchFile(state.folderID, entry.path)) {
+                    Toast.makeText(this, "Download already in progress", Toast.LENGTH_SHORT).show()
+                }
             }
         }
 
@@ -99,9 +101,21 @@ class MainActivity : AppCompatActivity() {
 
         vm.download.observe(this) { dl ->
             if (dl != null) {
-                val pct = if (dl.total > 0) (dl.downloaded * 100 / dl.total) else 0
-                binding.tvStatus.text = "Downloading ${dl.path} — $pct%"
+                binding.downloadFooter.visibility = View.VISIBLE
+                val filename = dl.path.substringAfterLast('/')
+                if (dl.total > 0) {
+                    binding.progressDownload.isIndeterminate = false
+                    val pct = (dl.downloaded * 100 / dl.total).toInt()
+                    binding.progressDownload.setProgressCompat(pct, true)
+                    binding.tvDownloadLabel.text = "Downloading $filename — $pct%"
+                } else {
+                    binding.progressDownload.isIndeterminate = true
+                    binding.tvDownloadLabel.text = "Connecting… $filename"
+                }
             } else {
+                binding.downloadFooter.visibility = View.GONE
+                binding.progressDownload.isIndeterminate = false
+                binding.progressDownload.setProgressCompat(0, false)
                 val state = vm.state.value
                 if (state is UiState.FileList) {
                     binding.tvStatus.text = statusText(state)
