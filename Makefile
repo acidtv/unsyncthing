@@ -2,7 +2,7 @@ GOMOBILE   ?= gomobile
 AAR        := android/app/libs/stclient.aar
 STCLIENT   := ./stclient
 
-.PHONY: all gomobile android tidy clean
+.PHONY: all gomobile android tidy test clean
 
 all: gomobile
 
@@ -20,6 +20,10 @@ $(AAR): $(shell find $(STCLIENT) -name '*.go')
 		-javapkg com.acidtv.unsyncthing \
 		-o ../$(AAR) \
 		.
+
+## Run Go unit tests.
+test:
+	cd $(STCLIENT) && go test ./...
 
 ## Run `go mod tidy` inside stclient/ to populate go.sum.
 tidy:
