@@ -73,18 +73,22 @@ class MainActivity : AppCompatActivity() {
                 is UiState.Idle -> {
                     binding.connectForm.visibility = View.VISIBLE
                     menuRefresh?.isVisible = false
+                    binding.tvFolderHeader.visibility = View.GONE
                     refreshConnectButton()
                     if (vm.download.value == null) binding.tvStatus.text = ""
                 }
                 is UiState.Connecting -> {
                     binding.connectForm.visibility = View.VISIBLE
                     menuRefresh?.isVisible = false
+                    binding.tvFolderHeader.visibility = View.GONE
                     binding.btnConnect.isEnabled = false
                     binding.tvStatus.text = "Connecting…"
                 }
                 is UiState.FileList -> {
                     binding.connectForm.visibility = View.GONE
                     menuRefresh?.isVisible = true
+                    binding.tvFolderHeader.visibility = View.VISIBLE
+                    binding.tvFolderHeader.text = state.folderID
                     adapter.submitList(state.entries)
                     if (vm.download.value == null) {
                         binding.tvStatus.text = statusText(state)
@@ -93,6 +97,7 @@ class MainActivity : AppCompatActivity() {
                 is UiState.Error -> {
                     binding.connectForm.visibility = View.VISIBLE
                     menuRefresh?.isVisible = false
+                    binding.tvFolderHeader.visibility = View.GONE
                     refreshConnectButton()
                     binding.tvStatus.text = ""
                     Toast.makeText(this, state.message, Toast.LENGTH_LONG).show()
@@ -170,8 +175,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun statusText(state: UiState.FileList): String {
-        val path = if (state.currentDir.isEmpty()) state.folderID
-                   else "${state.folderID}/${state.currentDir}"
-        return "$path  (${state.entries.size} items)"
+        val count = "${state.entries.size} items"
+        return if (state.currentDir.isEmpty()) count else "${state.currentDir}  ($count)"
     }
 }
