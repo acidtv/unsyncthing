@@ -18,6 +18,7 @@ $(AAR): $(shell find $(STCLIENT) -name '*.go')
 		-target android \
 		-androidapi 21 \
 		-javapkg com.acidtv.unsyncthing \
+		-ldflags="-extldflags=-Wl,-z,max-page-size=16384" \
 		-o ../$(AAR) \
 		.
 
