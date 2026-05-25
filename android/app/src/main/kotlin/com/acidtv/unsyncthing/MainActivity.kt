@@ -4,6 +4,8 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
 import android.widget.Toast
 import androidx.activity.viewModels
@@ -18,6 +20,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val vm: SyncthingViewModel by viewModels()
     private lateinit var adapter: FileListAdapter
+    private var menuRefresh: MenuItem? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,8 +52,6 @@ class MainActivity : AppCompatActivity() {
             binding.etFolder.setText(folder)
         }
 
-        binding.btnRefresh.setOnClickListener { vm.refreshListing() }
-
         binding.btnConnect.setOnClickListener {
             val addr = binding.etAddr.text.toString().trim()
             val peerID = binding.etPeerID.text.toString().trim()
@@ -71,19 +72,19 @@ class MainActivity : AppCompatActivity() {
             when (state) {
                 is UiState.Idle -> {
                     binding.connectForm.visibility = View.VISIBLE
-                    binding.btnRefresh.visibility = View.GONE
+                    menuRefresh?.isVisible = false
                     refreshConnectButton()
                     if (vm.download.value == null) binding.tvStatus.text = ""
                 }
                 is UiState.Connecting -> {
                     binding.connectForm.visibility = View.VISIBLE
-                    binding.btnRefresh.visibility = View.GONE
+                    menuRefresh?.isVisible = false
                     binding.btnConnect.isEnabled = false
                     binding.tvStatus.text = "Connecting…"
                 }
                 is UiState.FileList -> {
                     binding.connectForm.visibility = View.GONE
-                    binding.btnRefresh.visibility = View.VISIBLE
+                    menuRefresh?.isVisible = true
                     adapter.submitList(state.entries)
                     if (vm.download.value == null) {
                         binding.tvStatus.text = statusText(state)
@@ -91,7 +92,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 is UiState.Error -> {
                     binding.connectForm.visibility = View.VISIBLE
-                    binding.btnRefresh.visibility = View.GONE
+                    menuRefresh?.isVisible = false
                     refreshConnectButton()
                     binding.tvStatus.text = ""
                     Toast.makeText(this, state.message, Toast.LENGTH_LONG).show()
@@ -130,6 +131,21 @@ class MainActivity : AppCompatActivity() {
                 .show()
             vm.acknowledgeCompletion()
         }
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.menu_main, menu)
+        menuRefresh = menu.findItem(R.id.action_refresh)
+        menuRefresh?.isVisible = vm.state.value is UiState.FileList
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        if (item.itemId == R.id.action_refresh) {
+            vm.refreshListing()
+            return true
+        }
+        return super.onOptionsItemSelected(item)
     }
 
     private fun openFile(uri: Uri, mimeType: String) {
