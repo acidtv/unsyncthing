@@ -114,6 +114,8 @@ class MainActivity : AppCompatActivity() {
                 }
             } else {
                 binding.downloadFooter.visibility = View.GONE
+                binding.progressDownload.isIndeterminate = false
+                binding.progressDownload.setProgressCompat(0, false)
                 val state = vm.state.value
                 if (state is UiState.FileList) {
                     binding.tvStatus.text = statusText(state)
