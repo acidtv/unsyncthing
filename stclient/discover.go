@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/syncthing/syncthing/lib/discover"
@@ -28,10 +30,19 @@ const (
 // both global discovery (HTTPS) and local LAN discovery (UDP broadcast)
 // concurrently. Returns the first usable tcp:// address.
 //
+// myDeviceIDStr is our own device ID — used to seed an outgoing LAN-discovery
+// announce so peers on the same Wi-Fi will respond with their own
+// announcement immediately instead of waiting for their 30s broadcast cycle.
+// (See syncthing/lib/discover/local.go:recvAnnouncements — peers force an
+// immediate transmit when they see a previously-unknown device.)
+//
 // timeoutSecs bounds the whole operation; pick something like 8 — long
-// enough for an LAN broadcast cycle (peers announce every 30s but the cache
-// usually has fresh entries) and a WAN HTTPS round-trip.
-func Discover(peerDeviceIDStr string, timeoutSecs int) (string, error) {
+// enough for a WAN HTTPS round-trip and for a triggered LAN response.
+func Discover(myDeviceIDStr, peerDeviceIDStr string, timeoutSecs int) (string, error) {
+	myID, err := protocol.DeviceIDFromString(myDeviceIDStr)
+	if err != nil {
+		return "", fmt.Errorf("invalid my device ID: %w", err)
+	}
 	peerID, err := protocol.DeviceIDFromString(peerDeviceIDStr)
 	if err != nil {
 		return "", fmt.Errorf("invalid peer device ID: %w", err)
@@ -51,7 +62,7 @@ func Discover(peerDeviceIDStr string, timeoutSecs int) (string, error) {
 	results := make(chan result, 2)
 
 	go func() {
-		addrs, err := lookupLocal(ctx, peerID)
+		addrs, err := lookupLocal(ctx, myID, peerID)
 		results <- result{addrs: addrs, err: err, src: "local"}
 	}()
 	go func() {
@@ -59,12 +70,19 @@ func Discover(peerDeviceIDStr string, timeoutSecs int) (string, error) {
 		results <- result{addrs: addrs, err: err, src: "global"}
 	}()
 
-	var lastErr error
+	var localErr, globalErr error
 	var schemes []string
 	for i := 0; i < 2; i++ {
 		r := <-results
+		assign := func(e error) {
+			if r.src == "local" {
+				localErr = e
+			} else {
+				globalErr = e
+			}
+		}
 		if r.err != nil {
-			lastErr = fmt.Errorf("%s discovery: %w", r.src, r.err)
+			assign(r.err)
 			continue
 		}
 		addr, schemesSeen, err := pickTCP(r.addrs)
@@ -72,16 +90,13 @@ func Discover(peerDeviceIDStr string, timeoutSecs int) (string, error) {
 			return addr, nil
 		}
 		schemes = append(schemes, schemesSeen...)
-		lastErr = err
+		assign(err)
 	}
 
 	if len(schemes) > 0 {
 		return "", fmt.Errorf("peer reachable only via %s, not supported", joinUnique(schemes))
 	}
-	if lastErr != nil {
-		return "", lastErr
-	}
-	return "", errors.New("peer not announced to discovery")
+	return "", fmt.Errorf("local: %v; global: %v", localErr, globalErr)
 }
 
 // lookupGlobal queries the public Syncthing global discovery server.
@@ -127,19 +142,27 @@ func lookupGlobal(ctx context.Context, peerID protocol.DeviceID) ([]string, erro
 }
 
 // lookupLocal listens for Syncthing LAN-discovery UDP broadcasts on port
-// 21027 and returns when an announcement for peerID arrives.
-func lookupLocal(ctx context.Context, peerID protocol.DeviceID) ([]string, error) {
-	return lookupLocalOn(ctx, peerID, localDiscoveryPort)
+// 21027 and returns when an announcement for peerID arrives. It also sends
+// its own announce so peers respond immediately.
+func lookupLocal(ctx context.Context, myID, peerID protocol.DeviceID) ([]string, error) {
+	return lookupLocalOn(ctx, myID, peerID, localDiscoveryPort)
 }
 
 // lookupLocalOn is the testable variant of lookupLocal — accepts a port so
 // tests can use ephemeral sockets.
-func lookupLocalOn(ctx context.Context, peerID protocol.DeviceID, port int) ([]string, error) {
+func lookupLocalOn(ctx context.Context, myID, peerID protocol.DeviceID, port int) ([]string, error) {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: port})
 	if err != nil {
 		return nil, fmt.Errorf("open UDP %d: %w", port, err)
 	}
 	defer conn.Close()
+
+	enableBroadcast(conn)
+
+	// Send our own announce so any peer on this LAN sees us as a new device
+	// and immediately broadcasts back, instead of making us wait up to 30s
+	// for their next scheduled announce.
+	_ = sendAnnounce(conn, myID, port)
 
 	go func() {
 		<-ctx.Done()
@@ -173,6 +196,39 @@ func lookupLocalOn(ctx context.Context, peerID protocol.DeviceID, port int) ([]s
 		}
 		return rewriteUnspecified(ann.Addresses, src), nil
 	}
+}
+
+// enableBroadcast sets SO_BROADCAST on the underlying socket so writes to
+// 255.255.255.255 are permitted. Best-effort: failure is logged but not
+// fatal, since subnet-broadcast targets often work without it.
+func enableBroadcast(conn *net.UDPConn) {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return
+	}
+	_ = raw.Control(func(fd uintptr) {
+		_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+	})
+}
+
+// sendAnnounce emits a single LAN-discovery announce packet for myID to the
+// IPv4 broadcast address. Peers receiving it broadcast back immediately
+// (see syncthing/lib/discover/local.go:recvAnnouncements force-tick path).
+func sendAnnounce(conn *net.UDPConn, myID protocol.DeviceID, port int) error {
+	ann := discover.Announce{
+		ID:         myID,
+		InstanceID: rand.Int63(),
+	}
+	body, err := ann.Marshal()
+	if err != nil {
+		return err
+	}
+	pkt := make([]byte, 4+len(body))
+	binary.BigEndian.PutUint32(pkt[:4], discover.Magic)
+	copy(pkt[4:], body)
+	dst := &net.UDPAddr{IP: net.IPv4bcast, Port: port}
+	_, err = conn.WriteToUDP(pkt, dst)
+	return err
 }
 
 // rewriteUnspecified replaces 0.0.0.0 / :: hosts with the packet source IP,

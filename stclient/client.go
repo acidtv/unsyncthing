@@ -61,7 +61,7 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string) error {
 		return fmt.Errorf("invalid peer device ID: %w", err)
 	}
 
-	addr, err := Discover(peerDeviceIDStr, 8)
+	addr, err := Discover(c.myID.String(), peerDeviceIDStr, 8)
 	if err != nil {
 		return fmt.Errorf("discover peer: %w", err)
 	}

@@ -107,6 +107,9 @@ func TestLookupLocal(t *testing.T) {
 		raw[i] = byte(i)
 	}
 	peerID := protocol.DeviceID(raw)
+	var myRaw [32]byte
+	myRaw[0] = 0xAA
+	myID := protocol.DeviceID(myRaw)
 
 	ann := discover.Announce{
 		ID:         peerID,
@@ -127,7 +130,7 @@ func TestLookupLocal(t *testing.T) {
 	resultCh := make(chan []string, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		addrs, err := lookupLocalOn(ctx, peerID, port)
+		addrs, err := lookupLocalOn(ctx, myID, peerID, port)
 		if err != nil {
 			errCh <- err
 			return
@@ -177,13 +180,16 @@ func TestLookupLocalIgnoresWrongMagic(t *testing.T) {
 	var raw [32]byte
 	raw[0] = 1
 	peerID := protocol.DeviceID(raw)
+	var myRaw [32]byte
+	myRaw[0] = 2
+	myID := protocol.DeviceID(myRaw)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := lookupLocalOn(ctx, peerID, port)
+		_, err := lookupLocalOn(ctx, myID, peerID, port)
 		errCh <- err
 	}()
 
