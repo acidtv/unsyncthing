@@ -96,3 +96,7 @@ The protocol package API is version-sensitive. As of `v1.27.4` (pinned in `go.mo
 - `FileInfo` validity is checked via methods: `IsDeleted()`, `IsInvalid()`, `IsDirectory()`
 
 When upgrading syncthing, re-check all four of the above — they have changed between minor versions.
+
+## Issue tracking
+
+Whenever you encounter known issues, bugs, limitations, or remaining TODOs during a task, append them to `todo.md` under a `## Claude generated` header. Create the file if it doesn't exist. Do not remove or overwrite items already listed there.
