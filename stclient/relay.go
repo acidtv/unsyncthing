@@ -11,34 +11,27 @@ import (
 	"github.com/syncthing/syncthing/lib/relay/client"
 )
 
-// dialRelay opens a relayed connection to the peer identified by the ?id=
-// query on the relay URL. It returns a plain net.Conn that the caller wraps
-// in TLS — the relay only brokers raw bytes; the peer-to-peer BEP/TLS
-// handshake happens inside the tunnel.
+// dialRelay opens a relayed connection to peerID via the relay server at uri.
+// It returns a plain net.Conn that the caller wraps in TLS — the relay only
+// brokers raw bytes; the peer-to-peer BEP/TLS handshake happens inside the
+// tunnel.
 //
 // The bool return is the TLS role the caller must adopt: true → tls.Server,
-// false → tls.Client. The relay assigns sides randomly across the two
-// session participants; we just do what we're told.
+// false → tls.Client. The relay assigns sides at session-creation time; we
+// just do what we're told.
+//
+// The ?id= query on the URL (if present) is the *relay server's* own device
+// ID — the relay client lib verifies the relay's TLS cert against it. It is
+// not the peer's ID; that comes in as peerID, sourced from the user's
+// configured peer.
 //
 // See lib/connections/relay_dial.go in the syncthing source for the
 // reference implementation.
-func dialRelay(uri *url.URL, cert tls.Certificate) (net.Conn, bool, error) {
-	// Relay URLs look like relay://relay.example.com:22067/?id=PEER-DEVICE-ID.
-	// The relay broker uses ?id= to route the session to the listening peer;
-	// without it the broker has nothing to match.
-	peerIDStr := uri.Query().Get("id")
-	if peerIDStr == "" {
-		return nil, false, fmt.Errorf("relay URL missing ?id= peer device ID")
-	}
-	peerID, err := protocol.DeviceIDFromString(peerIDStr)
-	if err != nil {
-		return nil, false, fmt.Errorf("parse relay peer ID: %w", err)
-	}
-
+func dialRelay(uri *url.URL, peerID protocol.DeviceID, cert tls.Certificate) (net.Conn, bool, error) {
 	// Step 1: ask the relay broker for a session invitation. Internally this
 	// dials the relay over TCP and does a bep-relay ALPN TLS handshake using
-	// our own client cert. The relay client library handles all of that —
-	// the conn it returns from JoinSession is plain TCP again.
+	// our own client cert, verifying the relay's cert against ?id= on the
+	// URL. The conn JoinSession returns is plain TCP again.
 	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
 	defer cancel()
 	inv, err := client.GetInvitationFromRelay(ctx, uri, peerID, []tls.Certificate{cert}, dialTimeout)

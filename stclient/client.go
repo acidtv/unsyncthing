@@ -108,7 +108,7 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string, status ConnectStatus
 		if status != nil {
 			status.OnDialing(displayAddr(candidate))
 		}
-		tc, scheme, derr := dialAndHandshake(candidate, c.cert, tlsConf)
+		tc, scheme, derr := dialAndHandshake(candidate, peerID, c.cert, tlsConf)
 		if derr != nil {
 			dialErrs = append(dialErrs, fmt.Sprintf("%s: %v", candidate, derr))
 			continue
@@ -277,7 +277,11 @@ func (i *tlsConnInfo) ConnectionID() string     { return i.addr }
 // peer-to-peer TLS through a broker; the TLS config (bep/1.0 ALPN, our cert,
 // no hostname verification) is identical to the direct TCP path because the
 // peer's TLS endpoint behaves the same on either side of the tunnel.
-func dialAndHandshake(candidate string, cert tls.Certificate, tlsCfg *tls.Config) (*tls.Conn, string, error) {
+//
+// peerID is the device we're trying to reach — the relay broker needs it to
+// route the session. The TCP path doesn't use it (the address already
+// identifies the endpoint).
+func dialAndHandshake(candidate string, peerID protocol.DeviceID, cert tls.Certificate, tlsCfg *tls.Config) (*tls.Conn, string, error) {
 	u, err := url.Parse(candidate)
 	if err != nil {
 		return nil, "", fmt.Errorf("parse address: %w", err)
@@ -292,7 +296,7 @@ func dialAndHandshake(candidate string, cert tls.Certificate, tlsCfg *tls.Config
 	case "tcp", "tcp4", "tcp6":
 		nc, err = net.DialTimeout("tcp", u.Host, dialTimeout)
 	case "relay":
-		nc, isServer, err = dialRelay(u, cert)
+		nc, isServer, err = dialRelay(u, peerID, cert)
 	default:
 		return nil, "", fmt.Errorf("unsupported scheme %q", u.Scheme)
 	}
