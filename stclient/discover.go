@@ -17,6 +17,7 @@ import (
 
 	"github.com/syncthing/syncthing/lib/discover"
 	"github.com/syncthing/syncthing/lib/protocol"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -151,10 +152,14 @@ func lookupLocal(ctx context.Context, myID, peerID protocol.DeviceID) ([]string,
 // lookupLocalOn is the testable variant of lookupLocal — accepts a port so
 // tests can use ephemeral sockets.
 func lookupLocalOn(ctx context.Context, myID, peerID protocol.DeviceID, port int) ([]string, error) {
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: port})
+	// SO_REUSEADDR + SO_REUSEPORT so we coexist with another process already
+	// listening on :21027 (e.g. the official Syncthing app on the same phone).
+	lc := net.ListenConfig{Control: setReusePort}
+	pc, err := lc.ListenPacket(ctx, "udp4", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return nil, fmt.Errorf("open UDP %d: %w", port, err)
 	}
+	conn := pc.(*net.UDPConn)
 	defer conn.Close()
 
 	enableBroadcast(conn)
@@ -209,6 +214,22 @@ func enableBroadcast(conn *net.UDPConn) {
 	_ = raw.Control(func(fd uintptr) {
 		_ = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
 	})
+}
+
+// setReusePort is a ListenConfig.Control hook that enables SO_REUSEADDR and
+// SO_REUSEPORT so multiple processes can bind to the same UDP port.
+func setReusePort(_, _ string, c syscall.RawConn) error {
+	var sockErr error
+	if err := c.Control(func(fd uintptr) {
+		if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+			sockErr = err
+			return
+		}
+		sockErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+	}); err != nil {
+		return err
+	}
+	return sockErr
 }
 
 // sendAnnounce emits a single LAN-discovery announce packet for myID to the
