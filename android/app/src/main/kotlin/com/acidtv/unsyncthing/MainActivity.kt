@@ -97,8 +97,10 @@ class MainActivity : AppCompatActivity() {
                     menuRefresh?.isVisible = false
                     binding.tvFolderHeader.visibility = View.GONE
                     refreshConnectButton()
-                    binding.tvStatus.text = ""
-                    Toast.makeText(this, state.message, Toast.LENGTH_LONG).show()
+                    // Show the full message in tvStatus (no truncation) so long
+                    // combined errors like "local: …; global: …" are readable.
+                    binding.tvStatus.text = state.message
+                    android.util.Log.w("unsyncthing", "error: ${state.message}")
                 }
             }
         }

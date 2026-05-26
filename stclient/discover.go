@@ -97,7 +97,11 @@ func Discover(myDeviceIDStr, peerDeviceIDStr string, timeoutSecs int) (string, e
 	if len(schemes) > 0 {
 		return "", fmt.Errorf("peer reachable only via %s, not supported", joinUnique(schemes))
 	}
-	return "", fmt.Errorf("local: %v; global: %v", localErr, globalErr)
+	// Global first: it's usually the actionable error. Local bind failures
+	// (e.g. when the official Syncthing app already owns :21027) just mean
+	// LAN discovery is unavailable on this device — not why the peer wasn't
+	// found.
+	return "", fmt.Errorf("global: %v; local: %v", globalErr, localErr)
 }
 
 // lookupGlobal queries the public Syncthing global discovery server.
