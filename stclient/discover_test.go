@@ -15,19 +15,24 @@ func TestPickTCP(t *testing.T) {
 	tests := []struct {
 		name     string
 		in       []string
-		want     string
+		want     []string
 		wantErr  bool
 		wantSchm []string
 	}{
 		{
 			name: "tcp first",
 			in:   []string{"tcp://1.2.3.4:22000", "relay://r.example:22028"},
-			want: "1.2.3.4:22000",
+			want: []string{"1.2.3.4:22000"},
 		},
 		{
 			name: "relay first then tcp",
 			in:   []string{"relay://r.example:22028", "tcp://1.2.3.4:22000"},
-			want: "1.2.3.4:22000",
+			want: []string{"1.2.3.4:22000"},
+		},
+		{
+			name: "multiple tcp preserved in order",
+			in:   []string{"tcp://172.19.0.1:22000", "tcp://192.168.1.5:22000"},
+			want: []string{"172.19.0.1:22000", "192.168.1.5:22000"},
 		},
 		{
 			name:     "relay only",
@@ -49,7 +54,7 @@ func TestPickTCP(t *testing.T) {
 		{
 			name: "tcp6 accepted",
 			in:   []string{"tcp6://[2001:db8::1]:22000"},
-			want: "[2001:db8::1]:22000",
+			want: []string{"[2001:db8::1]:22000"},
 		},
 	}
 
@@ -59,14 +64,26 @@ func TestPickTCP(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err=%v wantErr=%v", err, tt.wantErr)
 			}
-			if got != tt.want {
-				t.Errorf("addr: got %q want %q", got, tt.want)
+			if !sameOrder(got, tt.want) {
+				t.Errorf("addrs: got %v want %v", got, tt.want)
 			}
 			if tt.wantSchm != nil && !sameSet(schemes, tt.wantSchm) {
 				t.Errorf("schemes: got %v want %v", schemes, tt.wantSchm)
 			}
 		})
 	}
+}
+
+func sameOrder(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestRewriteUnspecified(t *testing.T) {

@@ -33,9 +33,11 @@ const (
 	globalDiscoveryTimeout = 15 * time.Second
 )
 
-// Discover resolves a Syncthing device ID into a dialable host:port, using
-// both global discovery (HTTPS) and local LAN discovery (UDP broadcast)
-// concurrently. Returns the first usable tcp:// address.
+// Discover resolves a Syncthing device ID into dialable host:port addresses,
+// using both global discovery (HTTPS) and local LAN discovery (UDP broadcast)
+// concurrently. Returns the list of usable tcp:// addresses; the caller
+// dials them in order (the peer may announce e.g. a Docker bridge IP as the
+// first entry, so blindly taking the head won't work).
 //
 // myDeviceIDStr is our own device ID — used to seed an outgoing LAN-discovery
 // announce so peers on the same Wi-Fi will respond with their own
@@ -45,14 +47,14 @@ const (
 //
 // timeoutSecs bounds the whole operation; pick something like 8 — long
 // enough for a WAN HTTPS round-trip and for a triggered LAN response.
-func Discover(myDeviceIDStr, peerDeviceIDStr string, timeoutSecs int) (string, error) {
+func Discover(myDeviceIDStr, peerDeviceIDStr string, timeoutSecs int) ([]string, error) {
 	myID, err := protocol.DeviceIDFromString(myDeviceIDStr)
 	if err != nil {
-		return "", fmt.Errorf("invalid my device ID: %w", err)
+		return nil, fmt.Errorf("invalid my device ID: %w", err)
 	}
 	peerID, err := protocol.DeviceIDFromString(peerDeviceIDStr)
 	if err != nil {
-		return "", fmt.Errorf("invalid peer device ID: %w", err)
+		return nil, fmt.Errorf("invalid peer device ID: %w", err)
 	}
 
 	if timeoutSecs <= 0 {
@@ -79,6 +81,8 @@ func Discover(myDeviceIDStr, peerDeviceIDStr string, timeoutSecs int) (string, e
 
 	var localErr, globalErr error
 	var schemes []string
+	var tcps []string
+	seen := map[string]bool{}
 	for i := 0; i < 2; i++ {
 		r := <-results
 		assign := func(e error) {
@@ -92,22 +96,31 @@ func Discover(myDeviceIDStr, peerDeviceIDStr string, timeoutSecs int) (string, e
 			assign(r.err)
 			continue
 		}
-		addr, schemesSeen, err := pickTCP(r.addrs)
-		if err == nil {
-			return addr, nil
-		}
+		picked, schemesSeen, err := pickTCP(r.addrs)
 		schemes = append(schemes, schemesSeen...)
-		assign(err)
+		if err != nil {
+			assign(err)
+			continue
+		}
+		for _, a := range picked {
+			if !seen[a] {
+				seen[a] = true
+				tcps = append(tcps, a)
+			}
+		}
 	}
 
+	if len(tcps) > 0 {
+		return tcps, nil
+	}
 	if len(schemes) > 0 {
-		return "", fmt.Errorf("peer reachable only via %s, not supported", joinUnique(schemes))
+		return nil, fmt.Errorf("peer reachable only via %s, not supported", joinUnique(schemes))
 	}
 	// Global first: it's usually the actionable error. Local bind failures
 	// (e.g. when the official Syncthing app already owns :21027) just mean
 	// LAN discovery is unavailable on this device — not why the peer wasn't
 	// found.
-	return "", fmt.Errorf("global: %v; local: %v", globalErr, localErr)
+	return nil, fmt.Errorf("global: %v; local: %v", globalErr, localErr)
 }
 
 // lookupGlobal queries the public Syncthing global discovery server. The
@@ -313,11 +326,11 @@ func rewriteUnspecified(addrs []string, src *net.UDPAddr) []string {
 	return out
 }
 
-// pickTCP returns the first tcp:// address as host:port. If no tcp:// is
-// present, returns the set of schemes seen so the caller can build an
-// informative error.
-func pickTCP(addresses []string) (string, []string, error) {
-	var schemes []string
+// pickTCP returns every tcp:// address as host:port, preserving order. If
+// no tcp:// is present, returns the set of non-tcp schemes seen so the
+// caller can build an informative error.
+func pickTCP(addresses []string) ([]string, []string, error) {
+	var tcps, schemes []string
 	for _, a := range addresses {
 		u, err := url.Parse(a)
 		if err != nil {
@@ -328,15 +341,18 @@ func pickTCP(addresses []string) (string, []string, error) {
 			if u.Host == "" {
 				continue
 			}
-			return u.Host, nil, nil
+			tcps = append(tcps, u.Host)
 		default:
 			schemes = append(schemes, u.Scheme)
 		}
 	}
-	if len(schemes) == 0 {
-		return "", nil, errors.New("no addresses announced")
+	if len(tcps) > 0 {
+		return tcps, schemes, nil
 	}
-	return "", schemes, fmt.Errorf("no tcp address (found: %s)", joinUnique(schemes))
+	if len(schemes) == 0 {
+		return nil, nil, errors.New("no addresses announced")
+	}
+	return nil, schemes, fmt.Errorf("no tcp address (found: %s)", joinUnique(schemes))
 }
 
 func joinUnique(in []string) string {

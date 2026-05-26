@@ -16,7 +16,10 @@ import (
 const (
 	clientName       = "unsyncthing"
 	clientVersion    = "v0.1.0"
-	dialTimeout      = 30 * time.Second
+	// Per-candidate dial budget. Discovery may return multiple peer
+	// addresses (LAN IP + Docker bridge IP + public IP + ...); we try them
+	// in order, so cap each so an unreachable IP doesn't stall for 30s.
+	dialTimeout      = 5 * time.Second
 	handshakeTimeout = 30 * time.Second
 )
 
@@ -61,7 +64,7 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string) error {
 		return fmt.Errorf("invalid peer device ID: %w", err)
 	}
 
-	addr, err := Discover(c.myID.String(), peerDeviceIDStr, 8)
+	addrs, err := Discover(c.myID.String(), peerDeviceIDStr, 8)
 	if err != nil {
 		return fmt.Errorf("discover peer: %w", err)
 	}
@@ -83,23 +86,36 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string) error {
 		MinVersion:         tls.VersionTLS12,
 	}
 
-	netConn, err := net.DialTimeout("tcp", addr, dialTimeout)
-	if err != nil {
-		return fmt.Errorf("dial %s: %w", addr, err)
+	// Walk the candidate addresses in order. TCP-level failures (peer
+	// announces a Docker bridge IP unreachable from the phone, etc.) skip
+	// to the next; once TCP succeeds we're committed — a TLS or device-ID
+	// failure is fatal because it means we reached *something* claiming to
+	// be the peer.
+	var netConn net.Conn
+	var tlsConn *tls.Conn
+	var dialErrs []string
+	var addr string
+	for _, candidate := range addrs {
+		nc, derr := net.DialTimeout("tcp", candidate, dialTimeout)
+		if derr != nil {
+			dialErrs = append(dialErrs, fmt.Sprintf("%s: %v", candidate, derr))
+			continue
+		}
+		nc.SetDeadline(time.Now().Add(handshakeTimeout))
+		tc := tls.Client(nc, tlsConf)
+		if herr := tc.Handshake(); herr != nil {
+			nc.Close()
+			return fmt.Errorf("TLS handshake with %s: %w", candidate, herr)
+		}
+		if verr := verifyPeerDeviceID(tc, peerID); verr != nil {
+			tc.Close()
+			return verr
+		}
+		netConn, tlsConn, addr = nc, tc, candidate
+		break
 	}
-
-	// Bound the TLS handshake + BEP hello with an absolute deadline.
-	netConn.SetDeadline(time.Now().Add(handshakeTimeout))
-
-	tlsConn := tls.Client(netConn, tlsConf)
-	if err := tlsConn.Handshake(); err != nil {
-		netConn.Close()
-		return fmt.Errorf("TLS handshake: %w", err)
-	}
-
-	if err := verifyPeerDeviceID(tlsConn, peerID); err != nil {
-		tlsConn.Close()
-		return err
+	if tlsConn == nil {
+		return fmt.Errorf("dial: tried %d address(es): %s", len(addrs), strings.Join(dialErrs, "; "))
 	}
 
 	// BEP Hello exchange — protocol.NewConnection does NOT do this.
