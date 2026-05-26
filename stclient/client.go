@@ -55,10 +55,18 @@ func (c *Client) DeviceID() string {
 	return c.myID.String()
 }
 
+// ConnectStatus receives callbacks during the Connect dial loop so the UI
+// can show "Connecting to <addr>…" — handy when the peer announces several
+// addresses and we walk through them in sequence. Pass nil if you don't
+// need it. gomobile generates a Java interface from this.
+type ConnectStatus interface {
+	OnDialing(addr string)
+}
+
 // Connect resolves peerDeviceIDStr via global + LAN discovery, dials the
 // peer, and establishes an authenticated BEP session.
 // Idempotent: any previous connection on this Client is closed first.
-func (c *Client) Connect(peerDeviceIDStr, folderIDs string) error {
+func (c *Client) Connect(peerDeviceIDStr, folderIDs string, status ConnectStatus) error {
 	peerID, err := protocol.DeviceIDFromString(peerDeviceIDStr)
 	if err != nil {
 		return fmt.Errorf("invalid peer device ID: %w", err)
@@ -96,6 +104,9 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string) error {
 	var dialErrs []string
 	var addr string
 	for _, candidate := range addrs {
+		if status != nil {
+			status.OnDialing(candidate)
+		}
 		nc, derr := net.DialTimeout("tcp", candidate, dialTimeout)
 		if derr != nil {
 			dialErrs = append(dialErrs, fmt.Sprintf("%s: %v", candidate, derr))

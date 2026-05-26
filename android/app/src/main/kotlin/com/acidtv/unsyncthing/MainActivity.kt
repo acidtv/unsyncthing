@@ -80,7 +80,7 @@ class MainActivity : AppCompatActivity() {
                     menuRefresh?.isVisible = false
                     binding.tvFolderHeader.visibility = View.GONE
                     binding.btnConnect.isEnabled = false
-                    binding.tvStatus.text = "Connecting…"
+                    binding.tvStatus.text = state.status
                 }
                 is UiState.FileList -> {
                     binding.connectForm.visibility = View.GONE

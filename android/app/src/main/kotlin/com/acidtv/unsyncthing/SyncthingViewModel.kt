@@ -12,6 +12,7 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
 import com.acidtv.unsyncthing.stclient.Client
+import com.acidtv.unsyncthing.stclient.ConnectStatus
 import com.acidtv.unsyncthing.stclient.FetchProgress
 import com.acidtv.unsyncthing.stclient.Stclient
 import com.google.gson.Gson
@@ -36,7 +37,7 @@ data class FileEntry(
 
 sealed class UiState {
     object Idle : UiState()
-    object Connecting : UiState()
+    data class Connecting(val status: String) : UiState()
     data class FileList(
         val folderID: String,
         val allEntries: List<FileEntry>,
@@ -137,15 +138,20 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
             .putString("lastPeerID", peerDeviceID)
             .putString("lastFolder", folderID)
             .apply()
-        _state.value = UiState.Connecting
+        _state.value = UiState.Connecting("Looking up peer…")
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val c = ensureCert()
                 val newClient = Client(c.certPEM, c.keyPEM)
+                val status = object : ConnectStatus {
+                    override fun onDialing(addr: String) {
+                        _state.postValue(UiState.Connecting("Connecting to $addr…"))
+                    }
+                }
                 // Hold a MulticastLock while we wait for UDP broadcasts —
                 // some Wi-Fi power-save implementations drop them otherwise.
                 withMulticastLock {
-                    newClient.connect(peerDeviceID, folderID)
+                    newClient.connect(peerDeviceID, folderID, status)
                 }
                 newClient.waitForIndex(folderID, 30)
 
@@ -188,7 +194,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                         ?: throw IllegalStateException("connection lost; please reconnect")
                     val (peerID, folder) = saved
                     withMulticastLock {
-                        c.connect(peerID, folder)
+                        c.connect(peerID, folder, null)
                     }
                     c.waitForIndex(folder, 30)
                 }
