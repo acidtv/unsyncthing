@@ -11,64 +11,73 @@ import (
 	"github.com/syncthing/syncthing/lib/protocol"
 )
 
-func TestPickTCP(t *testing.T) {
+func TestPickSupported(t *testing.T) {
 	tests := []struct {
 		name     string
 		in       []string
 		want     []string
-		wantErr  bool
 		wantSchm []string
 	}{
 		{
-			name: "tcp first",
-			in:   []string{"tcp://1.2.3.4:22000", "relay://r.example:22028"},
-			want: []string{"1.2.3.4:22000"},
+			name: "tcp before relay even when relay comes first",
+			in:   []string{"relay://r.example:22028/?id=PEER", "tcp://1.2.3.4:22000"},
+			want: []string{"tcp://1.2.3.4:22000", "relay://r.example:22028/?id=PEER"},
 		},
 		{
-			name: "relay first then tcp",
-			in:   []string{"relay://r.example:22028", "tcp://1.2.3.4:22000"},
-			want: []string{"1.2.3.4:22000"},
+			name: "tcp first preserved",
+			in:   []string{"tcp://1.2.3.4:22000", "relay://r.example:22028/?id=PEER"},
+			want: []string{"tcp://1.2.3.4:22000", "relay://r.example:22028/?id=PEER"},
 		},
 		{
 			name: "multiple tcp preserved in order",
 			in:   []string{"tcp://172.19.0.1:22000", "tcp://192.168.1.5:22000"},
-			want: []string{"172.19.0.1:22000", "192.168.1.5:22000"},
+			want: []string{"tcp://172.19.0.1:22000", "tcp://192.168.1.5:22000"},
 		},
 		{
-			name:     "relay only",
-			in:       []string{"relay://r.example:22028"},
-			wantErr:  true,
-			wantSchm: []string{"relay"},
+			name: "relay only is now usable",
+			in:   []string{"relay://r.example:22028/?id=PEER"},
+			want: []string{"relay://r.example:22028/?id=PEER"},
 		},
 		{
-			name:     "quic only",
+			name:     "quic only still unsupported",
 			in:       []string{"quic://1.2.3.4:22000"},
-			wantErr:  true,
 			wantSchm: []string{"quic"},
 		},
 		{
-			name:    "empty",
-			in:      nil,
-			wantErr: true,
+			name: "empty",
+			in:   nil,
 		},
 		{
 			name: "tcp6 accepted",
 			in:   []string{"tcp6://[2001:db8::1]:22000"},
-			want: []string{"[2001:db8::1]:22000"},
+			want: []string{"tcp6://[2001:db8::1]:22000"},
+		},
+		{
+			name: "mixed: tcp, relay, and unsupported quic",
+			in: []string{
+				"quic://q.example:22000",
+				"relay://r.example:22028/?id=PEER",
+				"tcp://1.2.3.4:22000",
+			},
+			want: []string{
+				"tcp://1.2.3.4:22000",
+				"relay://r.example:22028/?id=PEER",
+			},
+			wantSchm: []string{"quic"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, schemes, err := pickTCP(tt.in)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("err=%v wantErr=%v", err, tt.wantErr)
-			}
+			got, schemes := pickSupported(tt.in)
 			if !sameOrder(got, tt.want) {
 				t.Errorf("addrs: got %v want %v", got, tt.want)
 			}
 			if tt.wantSchm != nil && !sameSet(schemes, tt.wantSchm) {
 				t.Errorf("schemes: got %v want %v", schemes, tt.wantSchm)
+			}
+			if tt.wantSchm == nil && len(schemes) != 0 {
+				t.Errorf("schemes: got %v want none", schemes)
 			}
 		})
 	}

@@ -33,11 +33,13 @@ const (
 	globalDiscoveryTimeout = 15 * time.Second
 )
 
-// Discover resolves a Syncthing device ID into dialable host:port addresses,
-// using both global discovery (HTTPS) and local LAN discovery (UDP broadcast)
-// concurrently. Returns the list of usable tcp:// addresses; the caller
-// dials them in order (the peer may announce e.g. a Docker bridge IP as the
-// first entry, so blindly taking the head won't work).
+// Discover resolves a Syncthing device ID into dialable addresses, using both
+// global discovery (HTTPS) and local LAN discovery (UDP broadcast)
+// concurrently. Returns the list of usable URLs (tcp://… and relay://…); the
+// caller parses each to dispatch by scheme. Direct TCP candidates are
+// returned before relay candidates — matching Syncthing's own preference
+// order — so a peer reachable both directly and through a relay tries the
+// direct path first.
 //
 // myDeviceIDStr is our own device ID — used to seed an outgoing LAN-discovery
 // announce so peers on the same Wi-Fi will respond with their own
@@ -80,38 +82,33 @@ func Discover(myDeviceIDStr, peerDeviceIDStr string, timeoutSecs int) ([]string,
 	}()
 
 	var localErr, globalErr error
-	var schemes []string
-	var tcps []string
+	// Merge both result sets before picking, so the global TCP > relay
+	// priority ordering applies across sources — otherwise a relay address
+	// from the source that returned first could end up before a TCP address
+	// from the slower source.
+	var raw []string
 	seen := map[string]bool{}
 	for i := 0; i < 2; i++ {
 		r := <-results
-		assign := func(e error) {
-			if r.src == "local" {
-				localErr = e
-			} else {
-				globalErr = e
-			}
+		if r.src == "local" {
+			localErr = r.err
+		} else {
+			globalErr = r.err
 		}
 		if r.err != nil {
-			assign(r.err)
 			continue
 		}
-		picked, schemesSeen, err := pickTCP(r.addrs)
-		schemes = append(schemes, schemesSeen...)
-		if err != nil {
-			assign(err)
-			continue
-		}
-		for _, a := range picked {
+		for _, a := range r.addrs {
 			if !seen[a] {
 				seen[a] = true
-				tcps = append(tcps, a)
+				raw = append(raw, a)
 			}
 		}
 	}
 
-	if len(tcps) > 0 {
-		return tcps, nil
+	picked, schemes := pickSupported(raw)
+	if len(picked) > 0 {
+		return picked, nil
 	}
 	if len(schemes) > 0 {
 		return nil, fmt.Errorf("peer reachable only via %s, not supported", joinUnique(schemes))
@@ -326,11 +323,15 @@ func rewriteUnspecified(addrs []string, src *net.UDPAddr) []string {
 	return out
 }
 
-// pickTCP returns every tcp:// address as host:port, preserving order. If
-// no tcp:// is present, returns the set of non-tcp schemes seen so the
-// caller can build an informative error.
-func pickTCP(addresses []string) ([]string, []string, error) {
-	var tcps, schemes []string
+// pickSupported filters announced addresses to ones the client knows how to
+// dial, ordered by scheme preference: all tcp:// first, then all relay://.
+// The returned strings are the original URLs unchanged — the caller parses
+// them again to dispatch by scheme (relay URLs carry an ?id=… query the
+// dialer needs). The second return value is the set of unsupported schemes
+// encountered (e.g. quic), so the caller can build a useful error when
+// nothing supported was found.
+func pickSupported(addresses []string) ([]string, []string) {
+	var tcps, relays, unsupported []string
 	for _, a := range addresses {
 		u, err := url.Parse(a)
 		if err != nil {
@@ -341,18 +342,17 @@ func pickTCP(addresses []string) ([]string, []string, error) {
 			if u.Host == "" {
 				continue
 			}
-			tcps = append(tcps, u.Host)
+			tcps = append(tcps, a)
+		case "relay":
+			if u.Host == "" {
+				continue
+			}
+			relays = append(relays, a)
 		default:
-			schemes = append(schemes, u.Scheme)
+			unsupported = append(unsupported, u.Scheme)
 		}
 	}
-	if len(tcps) > 0 {
-		return tcps, schemes, nil
-	}
-	if len(schemes) == 0 {
-		return nil, nil, errors.New("no addresses announced")
-	}
-	return nil, schemes, fmt.Errorf("no tcp address (found: %s)", joinUnique(schemes))
+	return append(tcps, relays...), unsupported
 }
 
 func joinUnique(in []string) string {
