@@ -25,7 +25,7 @@
         <com.google.android.material.textfield.TextInputLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Peer address  (e.g. 192.168.1.5:22000)">
+            android:hint="Peer address  (e.g. 192.168.1.5:22000, relay://relay.example.com:22067, quic://host:22001)">
             <com.google.android.material.textfield.TextInputEditText
                 android:id="@+id/etAddr"
                 android:layout_width="match_parent"

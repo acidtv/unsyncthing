@@ -3,8 +3,11 @@
 package stclient
 
 import (
+	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -52,12 +55,18 @@ func (c *Client) DeviceID() string {
 	return c.myID.String()
 }
 
-// Connect dials addr (host:port) and establishes an authenticated BEP session.
+// Connect dials addr and establishes an authenticated BEP session.
+// addr may be a bare host:port (TCP), or a URL with scheme tcp://, relay://, or quic://.
 // Idempotent: any previous connection on this Client is closed first.
 func (c *Client) Connect(addr, peerDeviceIDStr, folderIDs string) error {
 	peerID, err := protocol.DeviceIDFromString(peerDeviceIDStr)
 	if err != nil {
 		return fmt.Errorf("invalid peer device ID: %w", err)
+	}
+
+	parsedURL, err := parseAddr(addr)
+	if err != nil {
+		return err
 	}
 
 	c.mu.Lock()
@@ -77,48 +86,82 @@ func (c *Client) Connect(addr, peerDeviceIDStr, folderIDs string) error {
 		MinVersion:         tls.VersionTLS12,
 	}
 
-	netConn, err := net.DialTimeout("tcp", addr, dialTimeout)
-	if err != nil {
-		return fmt.Errorf("dial %s: %w", addr, err)
-	}
-
-	// Bound the TLS handshake + BEP hello with an absolute deadline.
-	netConn.SetDeadline(time.Now().Add(handshakeTimeout))
-
-	tlsConn := tls.Client(netConn, tlsConf)
-	if err := tlsConn.Handshake(); err != nil {
-		netConn.Close()
-		return fmt.Errorf("TLS handshake: %w", err)
-	}
-
-	if err := verifyPeerDeviceID(tlsConn, peerID); err != nil {
-		tlsConn.Close()
-		return err
-	}
-
-	// BEP Hello exchange — protocol.NewConnection does NOT do this.
-	// See syncthing/lib/protocol/hello.go.
-	if _, err := protocol.ExchangeHello(tlsConn, protocol.Hello{
+	ctx := context.Background()
+	now := time.Now()
+	hello := protocol.Hello{
 		DeviceName:    clientName,
 		ClientName:    clientName,
 		ClientVersion: clientVersion,
-		Timestamp:     time.Now().UnixNano(),
-	}); err != nil {
-		tlsConn.Close()
-		return fmt.Errorf("BEP hello: %w", err)
+		Timestamp:     now.UnixNano(),
 	}
 
-	// Past the handshake phase — clear the deadline.
-	netConn.SetDeadline(time.Time{})
+	var rwc io.ReadWriteCloser
+	var connInfo protocol.ConnectionInfo
+
+	switch parsedURL.Scheme {
+	case "tcp":
+		tc, netConn, err := dialTCP(parsedURL.Host, tlsConf)
+		if err != nil {
+			return err
+		}
+		if err := verifyPeerDeviceID(tc.ConnectionState().PeerCertificates, peerID); err != nil {
+			tc.Close()
+			return err
+		}
+		// BEP Hello exchange — protocol.NewConnection does NOT do this.
+		if _, err := protocol.ExchangeHello(tc, hello); err != nil {
+			tc.Close()
+			return fmt.Errorf("BEP hello: %w", err)
+		}
+		netConn.SetDeadline(time.Time{})
+		rwc = tc
+		connInfo = &tlsConnInfo{conn: tc, addr: parsedURL.Host, establishedAt: now}
+
+	case "relay":
+		tc, err := dialRelay(ctx, parsedURL, peerID, c.cert, tlsConf)
+		if err != nil {
+			return err
+		}
+		if err := verifyPeerDeviceID(tc.ConnectionState().PeerCertificates, peerID); err != nil {
+			tc.Close()
+			return err
+		}
+		if _, err := protocol.ExchangeHello(tc, hello); err != nil {
+			tc.Close()
+			return fmt.Errorf("BEP hello: %w", err)
+		}
+		tc.SetDeadline(time.Time{})
+		rwc = tc
+		connInfo = &relayConnInfo{conn: tc, addr: parsedURL.String(), establishedAt: now}
+
+	case "quic", "quic4", "quic6":
+		qconn, certs, remoteAddr, err := dialQUIC(ctx, parsedURL.Host, tlsConf)
+		if err != nil {
+			return err
+		}
+		if err := verifyPeerDeviceID(certs, peerID); err != nil {
+			qconn.Close()
+			return err
+		}
+		// TLS is built into QUIC; set a deadline just for the BEP hello.
+		qconn.SetDeadline(time.Now().Add(handshakeTimeout))
+		if _, err := protocol.ExchangeHello(qconn, hello); err != nil {
+			qconn.Close()
+			return fmt.Errorf("BEP hello: %w", err)
+		}
+		qconn.SetDeadline(time.Time{})
+		rwc = qconn
+		connInfo = &quicConnInfo{remoteAddr: remoteAddr, addr: parsedURL.Host, establishedAt: now}
+
+	default:
+		return fmt.Errorf("unsupported scheme %q (use tcp://, relay://, or quic://)", parsedURL.Scheme)
+	}
 
 	folders := splitFolderIDs(folderIDs)
 	model := newPeerModel()
-	// When the BEP connection dies (peer idle timeout, NAT churn, network blip)
-	// the protocol package calls Closed() on the model. Clear our reference so
-	// the next FetchFile sees IsConnected()==false and can trigger a reconnect
-	// instead of trying to use a dead conn and surfacing "connection closed".
-	// Done from a goroutine so we never deadlock if Closed fires while Close()
-	// is being driven from a code path that already holds c.mu.
+	// When the BEP connection dies the protocol package calls Closed() on the model.
+	// Clear our reference from a goroutine to avoid deadlock if Closed fires while
+	// Close() is already holding c.mu.
 	model.setOnClosed(func(_ error) {
 		go func() {
 			c.mu.Lock()
@@ -131,9 +174,9 @@ func (c *Client) Connect(addr, peerDeviceIDStr, folderIDs string) error {
 	})
 	conn := protocol.NewConnection(
 		peerID,
-		tlsConn, tlsConn, tlsConn,
+		rwc, rwc, rwc,
 		model,
-		&tlsConnInfo{conn: tlsConn, addr: addr, establishedAt: time.Now()},
+		connInfo,
 		protocol.CompressionMetadata,
 		nil, nil,
 	)
@@ -186,8 +229,7 @@ func (c *Client) snapshot() (protocol.Connection, *peerModel) {
 	return c.conn, c.model
 }
 
-func verifyPeerDeviceID(conn *tls.Conn, expected protocol.DeviceID) error {
-	certs := conn.ConnectionState().PeerCertificates
+func verifyPeerDeviceID(certs []*x509.Certificate, expected protocol.DeviceID) error {
 	if len(certs) == 0 {
 		return fmt.Errorf("peer presented no certificate")
 	}
