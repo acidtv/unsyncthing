@@ -46,21 +46,19 @@ class MainActivity : AppCompatActivity() {
             adapter = this@MainActivity.adapter
         }
 
-        vm.savedConnection()?.let { (addr, peerID, folder) ->
-            binding.etAddr.setText(addr)
+        vm.savedConnection()?.let { (peerID, folder) ->
             binding.etPeerID.setText(peerID)
             binding.etFolder.setText(folder)
         }
 
         binding.btnConnect.setOnClickListener {
-            val addr = binding.etAddr.text.toString().trim()
             val peerID = binding.etPeerID.text.toString().trim()
             val folder = binding.etFolder.text.toString().trim()
-            if (addr.isBlank() || peerID.isBlank() || folder.isBlank()) {
+            if (peerID.isBlank() || folder.isBlank()) {
                 Toast.makeText(this, "Fill in all fields", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            vm.connect(addr, peerID, folder)
+            vm.connect(peerID, folder)
         }
 
         vm.deviceID.observe(this) { id ->
@@ -82,7 +80,7 @@ class MainActivity : AppCompatActivity() {
                     menuRefresh?.isVisible = false
                     binding.tvFolderHeader.visibility = View.GONE
                     binding.btnConnect.isEnabled = false
-                    binding.tvStatus.text = "Connecting…"
+                    binding.tvStatus.text = state.status
                 }
                 is UiState.FileList -> {
                     binding.connectForm.visibility = View.GONE
@@ -99,8 +97,10 @@ class MainActivity : AppCompatActivity() {
                     menuRefresh?.isVisible = false
                     binding.tvFolderHeader.visibility = View.GONE
                     refreshConnectButton()
-                    binding.tvStatus.text = ""
-                    Toast.makeText(this, state.message, Toast.LENGTH_LONG).show()
+                    // Show the full message in tvStatus (no truncation) so long
+                    // combined errors like "local: …; global: …" are readable.
+                    binding.tvStatus.text = state.message
+                    android.util.Log.w("unsyncthing", "error: ${state.message}")
                 }
             }
         }
