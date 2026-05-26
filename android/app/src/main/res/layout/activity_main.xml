@@ -6,21 +6,21 @@
     android:orientation="vertical"
     android:padding="16dp">
 
-    <!-- Device ID display (user copies this into the remote Syncthing UI) -->
-    <TextView
-        android:id="@+id/tvDeviceID"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:fontFamily="monospace"
-        android:textSize="14sp"
-        android:paddingBottom="12dp" />
-
     <!-- Connection form -->
     <LinearLayout
         android:id="@+id/connectForm"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical">
+
+        <!-- Device ID display (user copies this into the remote Syncthing UI) -->
+        <TextView
+            android:id="@+id/tvDeviceID"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:textSize="14sp"
+            android:paddingBottom="12dp" />
 
         <com.google.android.material.textfield.TextInputLayout
             android:layout_width="match_parent"
