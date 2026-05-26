@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -94,35 +95,29 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string, status ConnectStatus
 		MinVersion:         tls.VersionTLS12,
 	}
 
-	// Walk the candidate addresses in order. TCP-level failures (peer
-	// announces a Docker bridge IP unreachable from the phone, etc.) skip
-	// to the next; once TCP succeeds we're committed — a TLS or device-ID
-	// failure is fatal because it means we reached *something* claiming to
-	// be the peer.
-	var netConn net.Conn
+	// Walk the candidate addresses in order. Discovery hands them to us in
+	// scheme priority (TCP before relay) and source ordering. Dial or
+	// handshake failures move on to the next candidate; only a device-ID
+	// mismatch is fatal — that means we reached *something* and it produced
+	// the wrong identity, which retrying won't fix.
 	var tlsConn *tls.Conn
+	var transport string
 	var dialErrs []string
 	var addr string
 	for _, candidate := range addrs {
 		if status != nil {
-			status.OnDialing(candidate)
+			status.OnDialing(displayAddr(candidate))
 		}
-		nc, derr := net.DialTimeout("tcp", candidate, dialTimeout)
+		tc, scheme, derr := dialAndHandshake(candidate, peerID, c.cert, tlsConf)
 		if derr != nil {
 			dialErrs = append(dialErrs, fmt.Sprintf("%s: %v", candidate, derr))
 			continue
-		}
-		nc.SetDeadline(time.Now().Add(handshakeTimeout))
-		tc := tls.Client(nc, tlsConf)
-		if herr := tc.Handshake(); herr != nil {
-			nc.Close()
-			return fmt.Errorf("TLS handshake with %s: %w", candidate, herr)
 		}
 		if verr := verifyPeerDeviceID(tc, peerID); verr != nil {
 			tc.Close()
 			return verr
 		}
-		netConn, tlsConn, addr = nc, tc, candidate
+		tlsConn, transport, addr = tc, scheme, candidate
 		break
 	}
 	if tlsConn == nil {
@@ -141,8 +136,9 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string, status ConnectStatus
 		return fmt.Errorf("BEP hello: %w", err)
 	}
 
-	// Past the handshake phase — clear the deadline.
-	netConn.SetDeadline(time.Time{})
+	// Past the handshake phase — clear the deadline. (*tls.Conn.SetDeadline
+	// delegates to the underlying net.Conn.)
+	tlsConn.SetDeadline(time.Time{})
 
 	folders := splitFolderIDs(folderIDs)
 	model := newPeerModel()
@@ -166,7 +162,7 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string, status ConnectStatus
 		peerID,
 		tlsConn, tlsConn, tlsConn,
 		model,
-		&tlsConnInfo{conn: tlsConn, addr: addr, establishedAt: time.Now()},
+		&tlsConnInfo{conn: tlsConn, addr: addr, transport: transport, establishedAt: time.Now()},
 		protocol.CompressionMetadata,
 		nil, nil,
 	)
@@ -257,14 +253,16 @@ func buildClusterConfig(myID, peerID protocol.DeviceID, folderIDs []string) prot
 }
 
 // tlsConnInfo implements protocol.ConnectionInfo for a raw TLS connection.
+// transport reflects how we reached the peer: "tcp" or "relay".
 type tlsConnInfo struct {
 	conn          *tls.Conn
 	addr          string
+	transport     string
 	establishedAt time.Time
 }
 
-func (i *tlsConnInfo) Type() string             { return "tcp" }
-func (i *tlsConnInfo) Transport() string        { return "tcp" }
+func (i *tlsConnInfo) Type() string             { return i.transport }
+func (i *tlsConnInfo) Transport() string        { return i.transport }
 func (i *tlsConnInfo) IsLocal() bool            { return false }
 func (i *tlsConnInfo) RemoteAddr() net.Addr     { return i.conn.RemoteAddr() }
 func (i *tlsConnInfo) Priority() int            { return 0 }
@@ -272,3 +270,73 @@ func (i *tlsConnInfo) String() string           { return i.addr }
 func (i *tlsConnInfo) Crypto() string           { return "tls" }
 func (i *tlsConnInfo) EstablishedAt() time.Time { return i.establishedAt }
 func (i *tlsConnInfo) ConnectionID() string     { return i.addr }
+
+// dialAndHandshake dials the given candidate URL according to its scheme,
+// then performs the BEP TLS handshake. Returns the post-handshake *tls.Conn
+// and the transport name ("tcp" or "relay"). The relay path tunnels the
+// peer-to-peer TLS through a broker; the TLS config (bep/1.0 ALPN, our cert,
+// no hostname verification) is identical to the direct TCP path because the
+// peer's TLS endpoint behaves the same on either side of the tunnel.
+//
+// peerID is the device we're trying to reach — the relay broker needs it to
+// route the session. The TCP path doesn't use it (the address already
+// identifies the endpoint).
+func dialAndHandshake(candidate string, peerID protocol.DeviceID, cert tls.Certificate, tlsCfg *tls.Config) (*tls.Conn, string, error) {
+	u, err := url.Parse(candidate)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse address: %w", err)
+	}
+	var nc net.Conn
+	// isServer flips us into tls.Server mode. The relay protocol randomises
+	// which side of the tunnel performs the active/passive TLS role, so we
+	// have to honour what the invitation tells us. Direct TCP is always
+	// client-side.
+	var isServer bool
+	switch u.Scheme {
+	case "tcp", "tcp4", "tcp6":
+		nc, err = net.DialTimeout("tcp", u.Host, dialTimeout)
+	case "relay":
+		nc, isServer, err = dialRelay(u, peerID, cert)
+	default:
+		return nil, "", fmt.Errorf("unsupported scheme %q", u.Scheme)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	nc.SetDeadline(time.Now().Add(handshakeTimeout))
+	var tc *tls.Conn
+	if isServer {
+		tc = tls.Server(nc, tlsCfg)
+	} else {
+		tc = tls.Client(nc, tlsCfg)
+	}
+	if herr := tc.Handshake(); herr != nil {
+		nc.Close()
+		return nil, "", fmt.Errorf("TLS handshake: %w", herr)
+	}
+	return tc, schemeTransport(u.Scheme), nil
+}
+
+func schemeTransport(scheme string) string {
+	switch scheme {
+	case "tcp", "tcp4", "tcp6":
+		return "tcp"
+	case "relay":
+		return "relay"
+	}
+	return scheme
+}
+
+// displayAddr trims an address for human-readable status updates. Relay URLs
+// carry the peer's device ID as ?id=…; the user already knows it (they
+// typed it) and showing the full URL clutters the "Connecting to …" line.
+func displayAddr(candidate string) string {
+	u, err := url.Parse(candidate)
+	if err != nil {
+		return candidate
+	}
+	if u.Host == "" {
+		return candidate
+	}
+	return u.Scheme + "://" + u.Host
+}
