@@ -46,21 +46,19 @@ class MainActivity : AppCompatActivity() {
             adapter = this@MainActivity.adapter
         }
 
-        vm.savedConnection()?.let { (addr, peerID, folder) ->
-            binding.etAddr.setText(addr)
+        vm.savedConnection()?.let { (peerID, folder) ->
             binding.etPeerID.setText(peerID)
             binding.etFolder.setText(folder)
         }
 
         binding.btnConnect.setOnClickListener {
-            val addr = binding.etAddr.text.toString().trim()
             val peerID = binding.etPeerID.text.toString().trim()
             val folder = binding.etFolder.text.toString().trim()
-            if (addr.isBlank() || peerID.isBlank() || folder.isBlank()) {
+            if (peerID.isBlank() || folder.isBlank()) {
                 Toast.makeText(this, "Fill in all fields", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            vm.connect(addr, peerID, folder)
+            vm.connect(peerID, folder)
         }
 
         vm.deviceID.observe(this) { id ->

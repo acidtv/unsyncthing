@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import androidx.lifecycle.AndroidViewModel
@@ -125,16 +126,14 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun savedConnection(): Triple<String, String, String>? {
-        val addr   = prefs.getString("lastAddr",   null) ?: return null
+    fun savedConnection(): Pair<String, String>? {
         val peerID = prefs.getString("lastPeerID", null) ?: return null
         val folder = prefs.getString("lastFolder", null) ?: return null
-        return Triple(addr, peerID, folder)
+        return Pair(peerID, folder)
     }
 
-    fun connect(addr: String, peerDeviceID: String, folderID: String) {
+    fun connect(peerDeviceID: String, folderID: String) {
         prefs.edit()
-            .putString("lastAddr",   addr)
             .putString("lastPeerID", peerDeviceID)
             .putString("lastFolder", folderID)
             .apply()
@@ -143,7 +142,11 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val c = ensureCert()
                 val newClient = Client(c.certPEM, c.keyPEM)
-                newClient.connect(addr, peerDeviceID, folderID)
+                // Hold a MulticastLock while we wait for UDP broadcasts —
+                // some Wi-Fi power-save implementations drop them otherwise.
+                withMulticastLock {
+                    newClient.connect(peerDeviceID, folderID)
+                }
                 newClient.waitForIndex(folderID, 30)
 
                 val json = String(newClient.listFolder(folderID))
@@ -183,8 +186,10 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 if (!c.isConnected) {
                     val saved = savedConnection()
                         ?: throw IllegalStateException("connection lost; please reconnect")
-                    val (addr, peerID, folder) = saved
-                    c.connect(addr, peerID, folder)
+                    val (peerID, folder) = saved
+                    withMulticastLock {
+                        c.connect(peerID, folder)
+                    }
                     c.waitForIndex(folder, 30)
                 }
                 c.fetchFile(folderID, filePath, dest.absolutePath, object : FetchProgress {
@@ -263,6 +268,21 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         synchronized(lock) {
             client?.close()
             client = null
+        }
+    }
+
+    private inline fun <T> withMulticastLock(block: () -> T): T {
+        val wifi = getApplication<Application>()
+            .applicationContext
+            .getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        val lock = wifi?.createMulticastLock("unsyncthing-discovery")?.apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+        try {
+            return block()
+        } finally {
+            try { lock?.release() } catch (_: Throwable) {}
         }
     }
 

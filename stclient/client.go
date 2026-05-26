@@ -52,12 +52,18 @@ func (c *Client) DeviceID() string {
 	return c.myID.String()
 }
 
-// Connect dials addr (host:port) and establishes an authenticated BEP session.
+// Connect resolves peerDeviceIDStr via global + LAN discovery, dials the
+// peer, and establishes an authenticated BEP session.
 // Idempotent: any previous connection on this Client is closed first.
-func (c *Client) Connect(addr, peerDeviceIDStr, folderIDs string) error {
+func (c *Client) Connect(peerDeviceIDStr, folderIDs string) error {
 	peerID, err := protocol.DeviceIDFromString(peerDeviceIDStr)
 	if err != nil {
 		return fmt.Errorf("invalid peer device ID: %w", err)
+	}
+
+	addr, err := Discover(peerDeviceIDStr, 8)
+	if err != nil {
+		return fmt.Errorf("discover peer: %w", err)
 	}
 
 	c.mu.Lock()
