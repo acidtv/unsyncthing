@@ -13,6 +13,7 @@
    - [ ] No IPv6-only smoke test in CI; verified manually only.
    - [ ] Snackbar truncates long error messages — the combined `local: …; global: …` discovery error gets cut off so you can't see both reasons. Move long errors into a dialog or an expandable view.
  - [x] Download progress bar in popup or bottom of screen, should already be visible even when we first need to make a new connection so the user has feedback that something is happening
+ - [ ] Cancel download button
  - [ ] Be able to 'bookmark' multiple folders with a name
  - [ ] Only display our device id on the start page
  - [x] Show the folder name as a header text, not as part of the current path
