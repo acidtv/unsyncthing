@@ -2,6 +2,7 @@ package stclient
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -22,7 +23,12 @@ import (
 
 const (
 	globalDiscoveryURL = "https://discovery.syncthing.net/v2/"
-	localDiscoveryPort = 21027
+	// Device ID of the public Syncthing global discovery server. Real
+	// Syncthing pins this and verifies it against the TLS cert hash — the
+	// server uses a self-signed Syncthing cert, not a CA-signed one valid
+	// for the hostname.
+	globalDiscoveryServerID = "LYXKCHX-VI3NYZR-ALCJBHF-WMZYSPK-QG6QJA3-MPFYMSO-U56GTUK-NA2MIAW"
+	localDiscoveryPort      = 21027
 
 	globalDiscoveryTimeout = 15 * time.Second
 )
@@ -104,8 +110,17 @@ func Discover(myDeviceIDStr, peerDeviceIDStr string, timeoutSecs int) (string, e
 	return "", fmt.Errorf("global: %v; local: %v", globalErr, localErr)
 }
 
-// lookupGlobal queries the public Syncthing global discovery server.
+// lookupGlobal queries the public Syncthing global discovery server. The
+// server presents a self-signed Syncthing-style cert (no valid hostname),
+// so we skip standard TLS hostname verification and instead check that the
+// peer cert's device-ID hash matches globalDiscoveryServerID — same trick
+// the real Syncthing client uses (see lib/discover/global.go:idCheckingHTTPClient).
 func lookupGlobal(ctx context.Context, peerID protocol.DeviceID) ([]string, error) {
+	expectedServerID, err := protocol.DeviceIDFromString(globalDiscoveryServerID)
+	if err != nil {
+		return nil, fmt.Errorf("parse server ID: %w", err)
+	}
+
 	u, err := url.Parse(globalDiscoveryURL)
 	if err != nil {
 		return nil, err
@@ -119,12 +134,29 @@ func lookupGlobal(ctx context.Context, peerID protocol.DeviceID) ([]string, erro
 		return nil, err
 	}
 
-	client := &http.Client{Timeout: globalDiscoveryTimeout}
+	client := &http.Client{
+		Timeout: globalDiscoveryTimeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+				MinVersion:         tls.VersionTLS12,
+			},
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	// Verify the server is who it claims to be by hashing its cert.
+	if resp.TLS == nil || len(resp.TLS.PeerCertificates) == 0 {
+		return nil, errors.New("discovery server presented no TLS certificate")
+	}
+	gotID := protocol.NewDeviceID(resp.TLS.PeerCertificates[0].Raw)
+	if gotID != expectedServerID {
+		return nil, fmt.Errorf("discovery server device ID mismatch: got %s, want %s", gotID, expectedServerID)
+	}
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, errors.New("peer not announced to global discovery (is it online and discovery-enabled?)")
