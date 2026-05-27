@@ -29,7 +29,9 @@ cd stclient && go mod tidy     # populates go.sum
 **Day-to-day:**
 ```bash
 make gomobile          # build stclient.aar → android/app/libs/
-make test              # run Go unit tests
+make test              # run both Go and Android unit tests
+make test-go           # run Go unit tests only
+make test-android      # run Android JVM unit tests only (host-side, no device)
 make android           # build debug APK (requires AAR)
 make install           # build + adb install to connected device
 make tidy              # go mod tidy inside stclient/
@@ -49,6 +51,7 @@ gobind -lang java -javapkg com.acidtv.unsyncthing .
 ```bash
 cd android && ./gradlew assembleDebug
 cd android && ./gradlew installDebug
+cd android && ./gradlew test
 cd android && ./gradlew lint
 ```
 

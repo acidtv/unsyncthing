@@ -2,7 +2,7 @@ GOMOBILE   ?= gomobile
 AAR        := android/app/libs/stclient.aar
 STCLIENT   := ./stclient
 
-.PHONY: all gomobile android tidy test clean
+.PHONY: all gomobile android tidy test test-go test-android clean
 
 all: gomobile
 
@@ -22,9 +22,16 @@ $(AAR): $(shell find $(STCLIENT) -name '*.go')
 		-o ../$(AAR) \
 		.
 
+## Run all unit tests (Go + Android).
+test: test-go test-android
+
 ## Run Go unit tests.
-test:
+test-go:
 	cd $(STCLIENT) && go test ./...
+
+## Run Android JVM unit tests (host-side, no device required).
+test-android:
+	cd android && ./gradlew test
 
 ## Run `go mod tidy` inside stclient/ to populate go.sum.
 tidy:

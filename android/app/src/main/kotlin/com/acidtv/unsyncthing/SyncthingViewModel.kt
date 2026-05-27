@@ -367,13 +367,14 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         return DownloadCompleted(displayName, uri, mime)
     }
 
-    private fun sanitizeFilename(filePath: String): String {
-        val basename = filePath.substringAfterLast('/').substringAfterLast('\\')
-        val cleaned = basename.filter { it.isLetterOrDigit() || it in "._-" }
-        return when {
-            cleaned.isBlank() -> "download"
-            cleaned == "." || cleaned == ".." -> "download"
-            else -> cleaned
-        }
+}
+
+internal fun sanitizeFilename(filePath: String): String {
+    val basename = filePath.substringAfterLast('/').substringAfterLast('\\')
+    val cleaned = basename.filter { it.isLetterOrDigit() || it in "._-" }
+    return when {
+        cleaned.isBlank() -> "download"
+        cleaned == "." || cleaned == ".." -> "download"
+        else -> cleaned
     }
 }

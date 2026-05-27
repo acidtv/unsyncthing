@@ -35,7 +35,7 @@ class FileListAdapter(
     }
 }
 
-private fun humanReadableBytes(bytes: Long): String {
+internal fun humanReadableBytes(bytes: Long): String {
     if (bytes < 1000) return "$bytes B"
     val ci: CharacterIterator = StringCharacterIterator("kMGTPE")
     var v = bytes

@@ -50,4 +50,6 @@ dependencies {
     implementation(libs.lifecycle.livedata.ktx)
     implementation(libs.coroutines.android)
     implementation(libs.gson)
+
+    testImplementation(libs.junit)
 }
