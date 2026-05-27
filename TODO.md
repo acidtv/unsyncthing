@@ -18,3 +18,7 @@
  - [x] Show the folder name as a header text, not as part of the current path
  - [x] Move the refresh button on the file listing to the/a menu bar
 
+## Claude generated
+
+ - [ ] APK build not verified in remote container — outbound network to `dl.google.com` is blocked so `./gradlew assembleDebug` can't resolve the Android Gradle Plugin. Build & smoke-test the fragment split locally before shipping.
+ - [ ] `refreshListing` failures still post `UiState.Error`, which after the screen split bounces the user from the file list back to the connect screen. Consider routing this through `_errorEvent` too so a transient refresh failure leaves the existing listing visible.

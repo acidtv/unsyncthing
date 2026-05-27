@@ -108,6 +108,12 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     private val _completed = MutableLiveData<DownloadCompleted?>(null)
     val completed: LiveData<DownloadCompleted?> = _completed
 
+    // Single-shot per-action error (e.g. a failed download). Distinct from
+    // UiState.Error, which is reserved for screen-level failures that should
+    // bounce the user back to the connect screen.
+    private val _errorEvent = MutableLiveData<String?>(null)
+    val errorEvent: LiveData<String?> = _errorEvent
+
     // Null while the cert is being generated on first launch.
     private val _deviceID = MutableLiveData<String?>(null)
     val deviceID: LiveData<String?> = _deviceID
@@ -138,6 +144,10 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
             .putString("lastPeerID", peerDeviceID)
             .putString("lastFolder", folderID)
             .apply()
+        // Drop any unconsumed one-shot events from a previous session so the
+        // new file list doesn't pop a Snackbar referencing the old download.
+        _completed.value = null
+        _errorEvent.value = null
         _state.value = UiState.Connecting("Looking up peer…")
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -207,7 +217,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                             val result = copyToDownloads(File(localPath), sanitizeFilename(filePath))
                             _completed.postValue(result)
                         } catch (e: Exception) {
-                            _state.postValue(UiState.Error("Save to Downloads failed: ${e.message}"))
+                            _errorEvent.postValue("Save to Downloads failed: ${e.message}")
                         } finally {
                             File(localPath).delete()
                             _download.postValue(null)
@@ -215,7 +225,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     override fun onError(msg: String) {
                         _download.postValue(null)
-                        _state.postValue(UiState.Error(msg))
+                        _errorEvent.postValue(msg)
                     }
                 })
             } catch (e: CancellationException) {
@@ -223,7 +233,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 throw e
             } catch (e: Exception) {
                 _download.postValue(null)
-                _state.postValue(UiState.Error(e.message ?: "Download failed"))
+                _errorEvent.postValue(e.message ?: "Download failed")
             }
         }
         return true
@@ -268,6 +278,8 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         }
         _state.value = UiState.Idle
         _download.value = null
+        _completed.value = null
+        _errorEvent.value = null
     }
 
     override fun onCleared() {
@@ -316,6 +328,10 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
 
     fun acknowledgeCompletion() {
         _completed.value = null
+    }
+
+    fun acknowledgeError() {
+        _errorEvent.value = null
     }
 
     private fun copyToDownloads(src: File, displayName: String): DownloadCompleted {
