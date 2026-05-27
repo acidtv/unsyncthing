@@ -144,6 +144,10 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
             .putString("lastPeerID", peerDeviceID)
             .putString("lastFolder", folderID)
             .apply()
+        // Drop any unconsumed one-shot events from a previous session so the
+        // new file list doesn't pop a Snackbar referencing the old download.
+        _completed.value = null
+        _errorEvent.value = null
         _state.value = UiState.Connecting("Looking up peer…")
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -274,6 +278,8 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         }
         _state.value = UiState.Idle
         _download.value = null
+        _completed.value = null
+        _errorEvent.value = null
     }
 
     override fun onCleared() {
