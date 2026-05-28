@@ -23,3 +23,7 @@
 
  - [ ] APK build not verified in remote container — outbound network to `dl.google.com` is blocked so `./gradlew assembleDebug` can't resolve the Android Gradle Plugin. Build & smoke-test the fragment split locally before shipping.
  - [ ] `refreshListing` failures still post `UiState.Error`, which after the screen split bounces the user from the file list back to the connect screen. Consider routing this through `_errorEvent` too so a transient refresh failure leaves the existing listing visible.
+ - [ ] Bookmark rename — long-press only offers Delete. To rename, the user must delete and re-add. Consider an "Edit" entry in the long-press dialog.
+ - [ ] Bookmark adapter doesn't highlight the bookmark that matches the currently-active connection, so after disconnecting it's not obvious which one you came from.
+ - [ ] Cancelling the connect dialog signals the coroutine but blocking JNI calls (`newClient.connect`, `waitForIndex`, `listFolder`) don't honour Kotlin cancellation, so the work runs to completion in the background — the client is just discarded on the way out. Fine in practice but wastes a TLS round-trip.
+ - [ ] `make test-android` couldn't run in the remote container — the Android Gradle Plugin is fetched from `dl.google.com` which is blocked. The new `UpsertBookmarkTest` and the rest of the bookmark feature need a local `make test-android` pass before shipping.

@@ -14,41 +14,34 @@
         android:textSize="14sp"
         android:paddingBottom="12dp" />
 
-    <com.google.android.material.textfield.TextInputLayout
+    <FrameLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="Peer device ID">
-        <com.google.android.material.textfield.TextInputEditText
-            android:id="@+id/etPeerID"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:fontFamily="monospace"
-            android:inputType="text" />
-    </com.google.android.material.textfield.TextInputLayout>
+        android:layout_height="0dp"
+        android:layout_weight="1">
 
-    <com.google.android.material.textfield.TextInputLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="Folder ID  (e.g. default)">
-        <com.google.android.material.textfield.TextInputEditText
-            android:id="@+id/etFolder"
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvBookmarks"
             android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <TextView
+            android:id="@+id/tvEmpty"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:inputType="text" />
-    </com.google.android.material.textfield.TextInputLayout>
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:textSize="16sp"
+            android:text="No saved connections — tap + to add one"
+            android:visibility="gone" />
+
+    </FrameLayout>
 
     <Button
-        android:id="@+id/btnConnect"
+        android:id="@+id/btnAddConnection"
+        style="?attr/materialButtonOutlinedStyle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:text="Connect" />
-
-    <TextView
-        android:id="@+id/tvStatus"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingVertical="8dp"
-        android:textSize="16sp" />
+        android:text="+ Add connection" />
 
 </LinearLayout>
