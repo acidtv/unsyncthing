@@ -4,6 +4,7 @@ package stclient
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -23,6 +24,12 @@ const (
 	dialTimeout      = 5 * time.Second
 	handshakeTimeout = 30 * time.Second
 )
+
+// Reason we attach when closing the BEP connection ourselves. Must be non-nil:
+// syncthing's protocol.Connection.Close calls err.Error() unconditionally to
+// embed the reason in the outgoing BEP Close message, so passing nil panics
+// with a nil-pointer dereference.
+var errClientClose = errors.New("closed by client")
 
 // Client manages a single BEP connection to a Syncthing peer.
 // Safe for concurrent use after Connect.
@@ -83,7 +90,7 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string, status ConnectStatus
 
 	// Close any prior connection before opening a new one.
 	if c.conn != nil {
-		c.conn.Close(nil)
+		c.conn.Close(errClientClose)
 		c.conn = nil
 		c.model = nil
 	}
@@ -202,7 +209,7 @@ func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.conn != nil {
-		c.conn.Close(nil)
+		c.conn.Close(errClientClose)
 		c.conn = nil
 		c.model = nil
 	}

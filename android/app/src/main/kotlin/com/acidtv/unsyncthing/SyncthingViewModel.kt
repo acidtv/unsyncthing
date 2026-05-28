@@ -77,6 +77,8 @@ data class DownloadProgress(val path: String, val downloaded: Long, val total: L
 
 data class DownloadCompleted(val displayName: String, val uri: Uri, val mimeType: String)
 
+data class Bookmark(val name: String, val peerID: String, val folderID: String)
+
 private data class CertData(
     @SerializedName("CertPEM")  val certPEM: String,
     @SerializedName("KeyPEM")   val keyPEM: String,
@@ -93,6 +95,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     private var client: Client? = null
     private var cert: CertData? = null
     private var downloadJob: Job? = null
+    private var connectJob: Job? = null
 
     private val _state = MutableLiveData<UiState>(UiState.Idle)
     val state: LiveData<UiState> = _state
@@ -118,6 +121,9 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     private val _deviceID = MutableLiveData<String?>(null)
     val deviceID: LiveData<String?> = _deviceID
 
+    private val _bookmarks = MutableLiveData<List<Bookmark>>(loadBookmarks())
+    val bookmarks: LiveData<List<Bookmark>> = _bookmarks
+
     init {
         // Generate the cert off the main thread so the very first launch
         // doesn't ANR on ECDSA P-384 keygen.
@@ -139,6 +145,40 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         return Pair(peerID, folder)
     }
 
+    fun saveBookmark(name: String, peerID: String, folderID: String) {
+        val updated = upsertBookmark(_bookmarks.value ?: emptyList(), Bookmark(name, peerID, folderID))
+        writeBookmarks(updated)
+    }
+
+    fun deleteBookmark(peerID: String, folderID: String) {
+        val updated = (_bookmarks.value ?: emptyList())
+            .filterNot { it.peerID == peerID && it.folderID == folderID }
+        writeBookmarks(updated)
+    }
+
+    private fun writeBookmarks(list: List<Bookmark>) {
+        prefs.edit().putString("bookmarks", gson.toJson(list)).apply()
+        _bookmarks.value = list
+    }
+
+    private fun loadBookmarks(): List<Bookmark> {
+        val raw = prefs.getString("bookmarks", null)
+        if (raw != null) {
+            val type = object : TypeToken<List<Bookmark>>() {}.type
+            return gson.fromJson(raw, type) ?: emptyList()
+        }
+        // Migration: seed from the legacy single-connection prefs so users
+        // upgrading don't lose their saved peer/folder.
+        val peerID = prefs.getString("lastPeerID", null)
+        val folderID = prefs.getString("lastFolder", null)
+        if (peerID != null && folderID != null) {
+            val seeded = listOf(Bookmark(folderID, peerID, folderID))
+            prefs.edit().putString("bookmarks", gson.toJson(seeded)).apply()
+            return seeded
+        }
+        return emptyList()
+    }
+
     fun connect(peerDeviceID: String, folderID: String) {
         prefs.edit()
             .putString("lastPeerID", peerDeviceID)
@@ -149,7 +189,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         _completed.value = null
         _errorEvent.value = null
         _state.value = UiState.Connecting("Looking up peer…")
-        viewModelScope.launch(Dispatchers.IO) {
+        connectJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 val c = ensureCert()
                 val newClient = Client(c.certPEM, c.keyPEM)
@@ -169,6 +209,15 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 val type = object : TypeToken<List<FileEntry>>() {}.type
                 val entries: List<FileEntry> = gson.fromJson(json, type) ?: emptyList()
 
+                // If the user hit Cancel mid-flight, state has been reset to
+                // Idle by disconnect(); drop the freshly built client on the
+                // floor rather than surfacing it as a FileList or Error.
+                val cancelled = _state.value !is UiState.Connecting
+                if (cancelled) {
+                    newClient.close()
+                    return@launch
+                }
+
                 synchronized(lock) {
                     client?.close()
                     client = newClient
@@ -178,7 +227,9 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _state.postValue(UiState.Error(e.message ?: "Connection failed"))
+                if (_state.value is UiState.Connecting) {
+                    _state.postValue(UiState.Error(e.message ?: "Connection failed"))
+                }
             }
         }
     }
@@ -272,6 +323,8 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun disconnect() {
+        connectJob?.cancel()
+        connectJob = null
         synchronized(lock) {
             client?.close()
             client = null
@@ -334,6 +387,10 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         _errorEvent.value = null
     }
 
+    fun acknowledgeUiError() {
+        if (_state.value is UiState.Error) _state.value = UiState.Idle
+    }
+
     private fun copyToDownloads(src: File, displayName: String): DownloadCompleted {
         val mime = MimeTypeMap.getSingleton()
             .getMimeTypeFromExtension(src.extension.lowercase())
@@ -367,6 +424,12 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         return DownloadCompleted(displayName, uri, mime)
     }
 
+}
+
+internal fun upsertBookmark(existing: List<Bookmark>, new: Bookmark): List<Bookmark> {
+    val idx = existing.indexOfFirst { it.peerID == new.peerID && it.folderID == new.folderID }
+    return if (idx >= 0) existing.toMutableList().apply { set(idx, new) }
+           else existing + new
 }
 
 internal fun sanitizeFilename(filePath: String): String {

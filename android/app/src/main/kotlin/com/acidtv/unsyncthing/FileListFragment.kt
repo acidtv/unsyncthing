@@ -62,11 +62,11 @@ class FileListFragment : Fragment() {
                 menuInflater.inflate(R.menu.menu_main, menu)
             }
             override fun onMenuItemSelected(item: MenuItem): Boolean {
-                if (item.itemId == R.id.action_refresh) {
-                    vm.refreshListing()
-                    return true
+                return when (item.itemId) {
+                    R.id.action_refresh -> { vm.refreshListing(); true }
+                    R.id.action_disconnect -> { vm.disconnect(); true }
+                    else -> false
                 }
-                return false
             }
         }, viewLifecycleOwner, Lifecycle.State.RESUMED)
 
@@ -74,10 +74,7 @@ class FileListFragment : Fragment() {
             viewLifecycleOwner,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
-                    if (!vm.navigateUp()) {
-                        isEnabled = false
-                        requireActivity().onBackPressedDispatcher.onBackPressed()
-                    }
+                    if (!vm.navigateUp()) vm.disconnect()
                 }
             },
         )
