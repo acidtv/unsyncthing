@@ -97,11 +97,10 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     private var downloadJob: Job? = null
     private var connectJob: Job? = null
 
-    // Set when the user cancels a download so late OnProgress callbacks (the
-    // block already in flight when CancelFetch landed) don't re-show the footer
-    // after we've hidden it. Reset at the start of each fetchFile.
-    @Volatile
-    private var cancelRequested = false
+    // Drops late OnProgress callbacks (the block already in flight when
+    // CancelFetch landed) so they don't re-show the footer after a cancel hid
+    // it. Re-armed at the start of each fetchFile.
+    private val cancelGuard = DownloadCancelGuard()
 
     private val _state = MutableLiveData<UiState>(UiState.Idle)
     val state: LiveData<UiState> = _state
@@ -243,7 +242,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     fun fetchFile(folderID: String, filePath: String): Boolean {
         if (downloadJob?.isActive == true) return false
         val c = synchronized(lock) { client } ?: return false
-        cancelRequested = false
+        cancelGuard.arm()
 
         downloadJob = viewModelScope.launch(Dispatchers.IO) {
             _download.postValue(DownloadProgress(filePath, 0, -1))
@@ -268,7 +267,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 c.fetchFile(folderID, filePath, dest.absolutePath, object : FetchProgress {
                     override fun onProgress(downloaded: Long, total: Long) {
-                        if (cancelRequested) return
+                        if (!cancelGuard.progressAllowed()) return
                         _download.postValue(DownloadProgress(filePath, downloaded, total))
                     }
                     override fun onDone(localPath: String) {
@@ -310,7 +309,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelDownload() {
         if (downloadJob?.isActive != true) return
         val c = synchronized(lock) { client }
-        cancelRequested = true
+        cancelGuard.cancel()
         _download.postValue(null)
         viewModelScope.launch(Dispatchers.IO) {
             c?.cancelFetch()
