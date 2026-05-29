@@ -162,8 +162,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deleteBookmark(peerID: String, folderID: String) {
-        val updated = (_bookmarks.value ?: emptyList())
-            .filterNot { it.peerID == peerID && it.folderID == folderID }
+        val updated = removeBookmark(_bookmarks.value ?: emptyList(), peerID, folderID)
         writeBookmarks(updated)
     }
 
@@ -467,6 +466,9 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     }
 
 }
+
+internal fun removeBookmark(existing: List<Bookmark>, peerID: String, folderID: String): List<Bookmark> =
+    existing.filterNot { it.peerID == peerID && it.folderID == folderID }
 
 internal fun upsertBookmark(existing: List<Bookmark>, new: Bookmark): List<Bookmark> {
     val idx = existing.indexOfFirst { it.peerID == new.peerID && it.folderID == new.folderID }
