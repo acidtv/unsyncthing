@@ -122,6 +122,12 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     private val _errorEvent = MutableLiveData<String?>(null)
     val errorEvent: LiveData<String?> = _errorEvent
 
+    // Single-shot "download cancelled" confirmation. Set true when the user
+    // cancels; the Activity calls acknowledgeCancelled() after showing the
+    // Snackbar so a config change doesn't re-fire it.
+    private val _cancelledEvent = MutableLiveData<Boolean?>(null)
+    val cancelledEvent: LiveData<Boolean?> = _cancelledEvent
+
     // Null while the cert is being generated on first launch.
     private val _deviceID = MutableLiveData<String?>(null)
     val deviceID: LiveData<String?> = _deviceID
@@ -193,6 +199,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         // new file list doesn't pop a Snackbar referencing the old download.
         _completed.value = null
         _errorEvent.value = null
+        _cancelledEvent.value = null
         _state.value = UiState.Connecting("Looking up peer…")
         connectJob = viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -311,6 +318,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         val c = synchronized(lock) { client }
         cancelGuard.cancel()
         _download.postValue(null)
+        _cancelledEvent.postValue(true)
         viewModelScope.launch(Dispatchers.IO) {
             c?.cancelFetch()
         }
@@ -362,6 +370,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         _download.value = null
         _completed.value = null
         _errorEvent.value = null
+        _cancelledEvent.value = null
     }
 
     override fun onCleared() {
@@ -414,6 +423,10 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
 
     fun acknowledgeError() {
         _errorEvent.value = null
+    }
+
+    fun acknowledgeCancelled() {
+        _cancelledEvent.value = null
     }
 
     fun acknowledgeUiError() {

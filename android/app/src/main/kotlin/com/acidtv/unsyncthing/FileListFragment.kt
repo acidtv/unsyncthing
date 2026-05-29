@@ -123,6 +123,12 @@ class FileListFragment : Fragment() {
             android.util.Log.w("unsyncthing", "error: $msg")
             vm.acknowledgeError()
         }
+
+        vm.cancelledEvent.observe(viewLifecycleOwner) { cancelled ->
+            if (cancelled != true) return@observe
+            Snackbar.make(binding.root, "Download cancelled", Snackbar.LENGTH_SHORT).show()
+            vm.acknowledgeCancelled()
+        }
     }
 
     override fun onDestroyView() {
