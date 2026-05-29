@@ -3,6 +3,7 @@
 package stclient
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -34,11 +35,12 @@ var errClientClose = errors.New("closed by client")
 // Client manages a single BEP connection to a Syncthing peer.
 // Safe for concurrent use after Connect.
 type Client struct {
-	mu    sync.Mutex
-	myID  protocol.DeviceID
-	cert  tls.Certificate
-	conn  protocol.Connection
-	model *peerModel
+	mu          sync.Mutex
+	myID        protocol.DeviceID
+	cert        tls.Certificate
+	conn        protocol.Connection
+	model       *peerModel
+	fetchCancel context.CancelFunc
 }
 
 // NewClient creates a Client from PEM-encoded certificate and private key.
@@ -212,6 +214,19 @@ func (c *Client) Close() {
 		c.conn.Close(errClientClose)
 		c.conn = nil
 		c.model = nil
+	}
+}
+
+// CancelFetch aborts the in-progress FetchFile, if any. No-op when idle.
+// The in-flight conn.Request returns promptly with a context-cancelled error;
+// FetchFile then removes the partial file and returns without reporting an
+// error, so the UI can treat a cancel as a clean stop.
+func (c *Client) CancelFetch() {
+	c.mu.Lock()
+	cancel := c.fetchCancel
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 

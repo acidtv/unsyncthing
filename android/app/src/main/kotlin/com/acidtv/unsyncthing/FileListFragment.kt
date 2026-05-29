@@ -87,6 +87,8 @@ class FileListFragment : Fragment() {
             }
         }
 
+        binding.btnCancelDownload.setOnClickListener { vm.cancelDownload() }
+
         vm.download.observe(viewLifecycleOwner) { dl ->
             if (dl != null) {
                 binding.downloadFooter.visibility = View.VISIBLE
@@ -120,6 +122,12 @@ class FileListFragment : Fragment() {
             Snackbar.make(binding.root, msg, Snackbar.LENGTH_LONG).show()
             android.util.Log.w("unsyncthing", "error: $msg")
             vm.acknowledgeError()
+        }
+
+        vm.cancelledEvent.observe(viewLifecycleOwner) { cancelled ->
+            if (cancelled != true) return@observe
+            Snackbar.make(binding.root, "Download cancelled", Snackbar.LENGTH_SHORT).show()
+            vm.acknowledgeCancelled()
         }
     }
 
