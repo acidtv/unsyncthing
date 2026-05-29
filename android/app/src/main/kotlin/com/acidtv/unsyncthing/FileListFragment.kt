@@ -81,7 +81,7 @@ class FileListFragment : Fragment() {
 
         vm.state.observe(viewLifecycleOwner) { state ->
             if (state is UiState.FileList) {
-                binding.tvFolderHeader.text = state.folderID
+                binding.tvFolderHeader.text = state.bookmarkName ?: state.folderID
                 binding.tvStatus.text = statusText(state)
                 adapter.submitList(state.entries)
             }

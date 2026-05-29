@@ -42,6 +42,7 @@ sealed class UiState {
         val folderID: String,
         val allEntries: List<FileEntry>,
         val currentDir: String = "",
+        val bookmarkName: String? = null,
     ) : UiState() {
         val entries: List<FileEntry> get() {
             val prefix = if (currentDir.isEmpty()) "" else "$currentDir/"
@@ -223,7 +224,10 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                     client = newClient
                 }
 
-                _state.postValue(UiState.FileList(folderID, entries))
+                val bookmarkName = _bookmarks.value
+                    ?.firstOrNull { it.peerID == peerDeviceID && it.folderID == folderID }
+                    ?.name
+                _state.postValue(UiState.FileList(folderID, entries, bookmarkName = bookmarkName))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
