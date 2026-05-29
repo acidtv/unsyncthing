@@ -19,6 +19,7 @@
     </com.google.android.material.textfield.TextInputLayout>
 
     <TextView
+        android:id="@+id/tvNameHint"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Leave blank to connect without saving."
