@@ -1,6 +1,7 @@
 package com.acidtv.unsyncthing
 
 import android.view.LayoutInflater
+import android.view.View
 import android.view.ViewGroup
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
@@ -9,7 +10,7 @@ import com.acidtv.unsyncthing.databinding.ItemBookmarkBinding
 
 class BookmarkAdapter(
     private val onTap: (Bookmark) -> Unit,
-    private val onLongPress: (Bookmark) -> Unit,
+    private val onMenuClick: (Bookmark, View) -> Unit,
 ) : ListAdapter<Bookmark, BookmarkAdapter.VH>(DIFF) {
 
     inner class VH(val binding: ItemBookmarkBinding) : RecyclerView.ViewHolder(binding.root)
@@ -23,7 +24,7 @@ class BookmarkAdapter(
         holder.binding.tvName.text = b.name
         holder.binding.tvDetails.text = "${b.folderID}  ·  ${b.peerID.take(7)}"
         holder.itemView.setOnClickListener { onTap(b) }
-        holder.itemView.setOnLongClickListener { onLongPress(b); true }
+        holder.binding.ibMenu.setOnClickListener { v -> onMenuClick(b, v) }
     }
 
     companion object {
