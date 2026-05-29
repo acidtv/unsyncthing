@@ -94,9 +94,19 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     // All client/cert mutation goes through `lock`.
     private val lock = Any()
     private var client: Client? = null
+    // The client whose Connect dial loop is currently running, or null when no
+    // connect is in flight. Held separately from `client` (which only points at
+    // a fully-established connection) so a cancel can abort the in-progress
+    // dial loop — the blocking native connect() ignores coroutine cancellation.
+    private var connectingClient: Client? = null
     private var cert: CertData? = null
     private var downloadJob: Job? = null
     private var connectJob: Job? = null
+
+    // Drops late OnDialing callbacks (a dial already dispatched from the Go
+    // thread when Cancel landed) so they don't re-show the connecting dialog
+    // after a cancel hid it. Re-armed at the start of each connect.
+    private val connectGuard = ConnectCancelGuard()
 
     // Drops late OnProgress callbacks (the block already in flight when
     // CancelFetch landed) so they don't re-show the footer after a cancel hid
@@ -200,13 +210,20 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         _completed.value = null
         _errorEvent.value = null
         _cancelledEvent.value = null
+        connectGuard.arm()
         _state.value = UiState.Connecting("Looking up peer…")
         connectJob = viewModelScope.launch(Dispatchers.IO) {
+            var newClient: Client? = null
             try {
                 val c = ensureCert()
-                val newClient = Client(c.certPEM, c.keyPEM)
+                newClient = Client(c.certPEM, c.keyPEM)
+                // Publish the in-flight client so cancelConnect() can abort its
+                // dial loop; the blocking native connect() can't be stopped by
+                // cancelling this coroutine.
+                synchronized(lock) { connectingClient = newClient }
                 val status = object : ConnectStatus {
                     override fun onDialing(addr: String) {
+                        if (!connectGuard.allowed()) return
                         _state.postValue(UiState.Connecting("Connecting to $addr…"))
                     }
                 }
@@ -215,17 +232,23 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 withMulticastLock {
                     newClient.connect(peerDeviceID, folderID, status)
                 }
+                // Bail before the (separately cancellable) index wait if Cancel
+                // already landed, closing the gap between connect() returning and
+                // waitForIndex registering its own cancel slot.
+                if (!connectGuard.allowed()) {
+                    newClient.close()
+                    return@launch
+                }
                 newClient.waitForIndex(folderID, 30)
 
                 val json = String(newClient.listFolder(folderID))
                 val type = object : TypeToken<List<FileEntry>>() {}.type
                 val entries: List<FileEntry> = gson.fromJson(json, type) ?: emptyList()
 
-                // If the user hit Cancel mid-flight, state has been reset to
-                // Idle by disconnect(); drop the freshly built client on the
+                // If the user hit Cancel mid-flight, disconnect() reset state to
+                // Idle and aborted the dial; drop the freshly built client on the
                 // floor rather than surfacing it as a FileList or Error.
-                val cancelled = _state.value !is UiState.Connecting
-                if (cancelled) {
+                if (!connectGuard.allowed() || _state.value !is UiState.Connecting) {
                     newClient.close()
                     return@launch
                 }
@@ -233,15 +256,25 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 synchronized(lock) {
                     client?.close()
                     client = newClient
+                    connectingClient = null
                 }
 
                 val bookmarkName = bookmarkNameFor(_bookmarks.value ?: emptyList(), peerDeviceID, folderID)
                 _state.postValue(UiState.FileList(folderID, entries, bookmarkName = bookmarkName))
             } catch (e: CancellationException) {
+                newClient?.close()
                 throw e
             } catch (e: Exception) {
-                if (_state.value is UiState.Connecting) {
+                // A cancel aborts the dial loop with an error; swallow it (the
+                // user asked to stop) and only surface genuine failures.
+                if (connectGuard.allowed() && _state.value is UiState.Connecting) {
                     _state.postValue(UiState.Error(e.message ?: "Connection failed"))
+                } else {
+                    newClient?.close()
+                }
+            } finally {
+                synchronized(lock) {
+                    if (connectingClient === newClient) connectingClient = null
                 }
             }
         }
@@ -358,6 +391,15 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun disconnect() {
+        // Suppress any late OnDialing posts before tearing things down, so a
+        // callback already in flight can't re-show the connecting dialog.
+        connectGuard.cancel()
+        // Abort the in-flight dial loop. cancelConnect() is non-blocking; the
+        // connect coroutine then unwinds and closes its own client. We don't
+        // close it here to avoid blocking this (main) thread on connection
+        // teardown.
+        val connecting = synchronized(lock) { connectingClient }
+        connecting?.cancelConnect()
         connectJob?.cancel()
         connectJob = null
         synchronized(lock) {

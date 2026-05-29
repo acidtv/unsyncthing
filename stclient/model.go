@@ -1,6 +1,7 @@
 package stclient
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -84,11 +85,11 @@ func (m *peerModel) DownloadProgress(_ protocol.Connection, _ *protocol.Download
 }
 
 // waitForIndex blocks until the index for folderID has settled (no
-// Index/IndexUpdate for a short quiet period) or until timeout elapses.
-// Returns nil with partial data if timeout fires after at least one update.
-// Syncthing sends large initial syncs as one Index followed by many
-// IndexUpdate batches, so we cannot return on the first message alone.
-func (m *peerModel) waitForIndex(folderID string, timeout time.Duration) error {
+// Index/IndexUpdate for a short quiet period), until timeout elapses, or until
+// ctx is cancelled. Returns nil with partial data if timeout fires after at
+// least one update. Syncthing sends large initial syncs as one Index followed
+// by many IndexUpdate batches, so we cannot return on the first message alone.
+func (m *peerModel) waitForIndex(ctx context.Context, folderID string, timeout time.Duration) error {
 	const (
 		quiet      = 3 * time.Second
 		pollPeriod = 100 * time.Millisecond
@@ -96,6 +97,10 @@ func (m *peerModel) waitForIndex(folderID string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 
 	for {
+		if ctx.Err() != nil {
+			return fmt.Errorf("cancelled waiting for index of folder %q", folderID)
+		}
+
 		m.mu.RLock()
 		last, haveAny := m.lastUpdate[folderID]
 		m.mu.RUnlock()
@@ -112,7 +117,13 @@ func (m *peerModel) waitForIndex(folderID string, timeout time.Duration) error {
 					"(2) the folder is shared with this device on the peer, and "+
 					"(3) the folder ID matches exactly", folderID)
 		}
-		time.Sleep(pollPeriod)
+		// Interruptible sleep: a cancel returns within microseconds rather than
+		// waiting out the poll period.
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("cancelled waiting for index of folder %q", folderID)
+		case <-time.After(pollPeriod):
+		}
 	}
 }
 

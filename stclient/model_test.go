@@ -1,6 +1,7 @@
 package stclient
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -148,7 +149,7 @@ func TestPeerModel_Closed_NoCallback(t *testing.T) {
 
 func TestPeerModel_WaitForIndex_NeverSeen(t *testing.T) {
 	m := newPeerModel()
-	err := m.waitForIndex("missing", 50*time.Millisecond)
+	err := m.waitForIndex(context.Background(), "missing", 50*time.Millisecond)
 	if err == nil {
 		t.Error("waitForIndex() should error when folder never received data and timeout elapses")
 	}
@@ -162,7 +163,7 @@ func TestPeerModel_WaitForIndex_AlreadySettled(t *testing.T) {
 	m.lastUpdate["f"] = time.Now().Add(-4 * time.Second)
 	m.mu.Unlock()
 
-	if err := m.waitForIndex("f", 100*time.Millisecond); err != nil {
+	if err := m.waitForIndex(context.Background(), "f", 100*time.Millisecond); err != nil {
 		t.Errorf("waitForIndex() with settled data should return nil, got: %v", err)
 	}
 }
@@ -176,7 +177,7 @@ func TestPeerModel_WaitForIndex_ReturnsPartialOnTimeout(t *testing.T) {
 	m.mu.Unlock()
 
 	// Timeout fires while data is present → returns nil (partial is OK).
-	if err := m.waitForIndex("f", 150*time.Millisecond); err != nil {
+	if err := m.waitForIndex(context.Background(), "f", 150*time.Millisecond); err != nil {
 		t.Errorf("waitForIndex() with partial data should return nil on timeout, got: %v", err)
 	}
 }
@@ -190,8 +191,31 @@ func TestPeerModel_WaitForIndex_SettlesAfterDelay(t *testing.T) {
 		m.lastUpdate["f"] = time.Now().Add(-4 * time.Second) // already past quiet
 		m.mu.Unlock()
 	}()
-	if err := m.waitForIndex("f", 500*time.Millisecond); err != nil {
+	if err := m.waitForIndex(context.Background(), "f", 500*time.Millisecond); err != nil {
 		t.Errorf("waitForIndex() should return nil once data settles, got: %v", err)
+	}
+}
+
+func TestPeerModel_WaitForIndex_CancelReturnsPromptly(t *testing.T) {
+	m := newPeerModel()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Cancel shortly after the wait starts. With a 10s timeout and no index
+	// ever arriving, only honouring cancellation lets this return quickly.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	err := m.waitForIndex(ctx, "f", 10*time.Second)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Error("waitForIndex() should return an error when cancelled before the index arrives")
+	}
+	if elapsed > time.Second {
+		t.Errorf("waitForIndex() took %v after cancel; should return promptly, not wait out the timeout", elapsed)
 	}
 }
 
