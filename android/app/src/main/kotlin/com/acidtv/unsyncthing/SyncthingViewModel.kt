@@ -290,6 +290,18 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
+    // Abort the active download. Signals the Go layer to unblock the in-flight
+    // block request; FetchFile then returns without firing OnError, so no error
+    // event is surfaced. Hides the footer immediately for responsive feedback.
+    fun cancelDownload() {
+        if (downloadJob?.isActive != true) return
+        val c = synchronized(lock) { client }
+        _download.postValue(null)
+        viewModelScope.launch(Dispatchers.IO) {
+            c?.cancelFetch()
+        }
+    }
+
     fun refreshListing() {
         val current = _state.value as? UiState.FileList ?: return
         val c = synchronized(lock) { client } ?: return
@@ -326,6 +338,9 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         connectJob?.cancel()
         connectJob = null
         synchronized(lock) {
+            // Abort any in-flight download first so it stops cleanly rather than
+            // surfacing a "connection closed" error once we tear down the conn.
+            client?.cancelFetch()
             client?.close()
             client = null
         }

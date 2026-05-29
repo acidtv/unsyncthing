@@ -87,6 +87,8 @@ class FileListFragment : Fragment() {
             }
         }
 
+        binding.btnCancelDownload.setOnClickListener { vm.cancelDownload() }
+
         vm.download.observe(viewLifecycleOwner) { dl ->
             if (dl != null) {
                 binding.downloadFooter.visibility = View.VISIBLE
