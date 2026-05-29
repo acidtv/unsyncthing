@@ -97,6 +97,11 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     private var downloadJob: Job? = null
     private var connectJob: Job? = null
 
+    // Drops late OnProgress callbacks (the block already in flight when
+    // CancelFetch landed) so they don't re-show the footer after a cancel hid
+    // it. Re-armed at the start of each fetchFile.
+    private val cancelGuard = DownloadCancelGuard()
+
     private val _state = MutableLiveData<UiState>(UiState.Idle)
     val state: LiveData<UiState> = _state
 
@@ -116,6 +121,12 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     // bounce the user back to the connect screen.
     private val _errorEvent = MutableLiveData<String?>(null)
     val errorEvent: LiveData<String?> = _errorEvent
+
+    // Single-shot "download cancelled" confirmation. Set true when the user
+    // cancels; the Activity calls acknowledgeCancelled() after showing the
+    // Snackbar so a config change doesn't re-fire it.
+    private val _cancelledEvent = MutableLiveData<Boolean?>(null)
+    val cancelledEvent: LiveData<Boolean?> = _cancelledEvent
 
     // Null while the cert is being generated on first launch.
     private val _deviceID = MutableLiveData<String?>(null)
@@ -188,6 +199,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         // new file list doesn't pop a Snackbar referencing the old download.
         _completed.value = null
         _errorEvent.value = null
+        _cancelledEvent.value = null
         _state.value = UiState.Connecting("Looking up peer…")
         connectJob = viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -237,6 +249,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     fun fetchFile(folderID: String, filePath: String): Boolean {
         if (downloadJob?.isActive == true) return false
         val c = synchronized(lock) { client } ?: return false
+        cancelGuard.arm()
 
         downloadJob = viewModelScope.launch(Dispatchers.IO) {
             _download.postValue(DownloadProgress(filePath, 0, -1))
@@ -261,6 +274,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 c.fetchFile(folderID, filePath, dest.absolutePath, object : FetchProgress {
                     override fun onProgress(downloaded: Long, total: Long) {
+                        if (!cancelGuard.progressAllowed()) return
                         _download.postValue(DownloadProgress(filePath, downloaded, total))
                     }
                     override fun onDone(localPath: String) {
@@ -279,6 +293,12 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                         _errorEvent.postValue(msg)
                     }
                 })
+                // FetchFile has returned, so no further progress callbacks can
+                // fire (OnProgress runs synchronously inside the blocking call).
+                // The cancel path fires neither OnDone nor OnError, so clear the
+                // footer here to guarantee it hides; harmless on the success
+                // path where OnDone already cleared it.
+                _download.postValue(null)
             } catch (e: CancellationException) {
                 _download.postValue(null)
                 throw e
@@ -288,6 +308,20 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         return true
+    }
+
+    // Abort the active download. Signals the Go layer to unblock the in-flight
+    // block request; FetchFile then returns without firing OnError, so no error
+    // event is surfaced. Hides the footer immediately for responsive feedback.
+    fun cancelDownload() {
+        if (downloadJob?.isActive != true) return
+        val c = synchronized(lock) { client }
+        cancelGuard.cancel()
+        _download.postValue(null)
+        _cancelledEvent.postValue(true)
+        viewModelScope.launch(Dispatchers.IO) {
+            c?.cancelFetch()
+        }
     }
 
     fun refreshListing() {
@@ -326,6 +360,9 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         connectJob?.cancel()
         connectJob = null
         synchronized(lock) {
+            // Abort any in-flight download first so it stops cleanly rather than
+            // surfacing a "connection closed" error once we tear down the conn.
+            client?.cancelFetch()
             client?.close()
             client = null
         }
@@ -333,6 +370,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         _download.value = null
         _completed.value = null
         _errorEvent.value = null
+        _cancelledEvent.value = null
     }
 
     override fun onCleared() {
@@ -385,6 +423,10 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
 
     fun acknowledgeError() {
         _errorEvent.value = null
+    }
+
+    fun acknowledgeCancelled() {
+        _cancelledEvent.value = null
     }
 
     fun acknowledgeUiError() {

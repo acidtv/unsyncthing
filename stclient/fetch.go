@@ -66,13 +66,32 @@ func (c *Client) FetchFile(folderID, filePath, destPath string, progress FetchPr
 		_ = os.Remove(destPath)
 	}
 
-	ctx := context.Background()
+	// Register a cancellable context so CancelFetch can abort a download
+	// mid-transfer. Single download at a time is enforced by the caller, so a
+	// single cancel slot suffices. Clear it (and release resources) on return.
+	ctx, cancel := context.WithCancel(context.Background())
+	c.mu.Lock()
+	c.fetchCancel = cancel
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.fetchCancel = nil
+		c.mu.Unlock()
+		cancel()
+	}()
+
 	var downloaded int64
 
 	for blockNo, b := range target.Blocks {
 		data, err := conn.Request(ctx, folderID, filePath, blockNo, b.Offset, int(b.Size), b.Hash, b.WeakHash, false)
 		if err != nil {
 			cleanup()
+			// A cancelled context means the user aborted: drop the partial file
+			// (cleanup already did) and return quietly without OnError so the UI
+			// doesn't surface an error for an intentional cancel.
+			if ctx.Err() != nil {
+				return nil
+			}
 			if progress != nil {
 				progress.OnError(fmt.Sprintf("block %d: %v", blockNo, err))
 			}
