@@ -62,8 +62,8 @@
             android:id="@+id/btnCancelDownload"
             android:layout_width="48dp"
             android:layout_height="match_parent"
-            android:scaleType="centerInside"
-            android:src="@android:drawable/ic_menu_close_clear_cancel"
+            android:scaleType="center"
+            android:src="@drawable/ic_close"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="Cancel download" />
 
