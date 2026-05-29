@@ -232,6 +232,13 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 withMulticastLock {
                     newClient.connect(peerDeviceID, folderID, status)
                 }
+                // Bail before the (separately cancellable) index wait if Cancel
+                // already landed, closing the gap between connect() returning and
+                // waitForIndex registering its own cancel slot.
+                if (!connectGuard.allowed()) {
+                    newClient.close()
+                    return@launch
+                }
                 newClient.waitForIndex(folderID, 30)
 
                 val json = String(newClient.listFolder(folderID))

@@ -42,15 +42,42 @@ type Client struct {
 	model       *peerModel
 	fetchCancel context.CancelFunc
 
-	// connectCancel aborts the dial loop of an in-flight Connect. It has its
-	// own mutex (not mu) because Connect holds mu for the whole dial loop, so
+	// connectCancel aborts whichever step of the connect sequence is in
+	// flight — the Connect dial loop or the subsequent WaitForIndex — so a
+	// single CancelConnect stops the whole attempt promptly. It has its own
+	// mutex (not mu) because Connect holds mu for the whole dial loop, so
 	// CancelConnect must reach the cancel func without contending for mu.
-	// connectGen identifies which Connect owns the slot so a stale Connect's
-	// deferred cleanup doesn't clear a newer one's cancel func (func values
+	// connectGen identifies which step owns the slot so a finished step's
+	// deferred cleanup doesn't clear a later step's cancel func (func values
 	// aren't comparable, so we tag them with a generation counter instead).
 	connectMu     sync.Mutex
 	connectCancel context.CancelFunc
 	connectGen    uint64
+}
+
+// beginCancellable registers cancel as the current cancellable connect step
+// and returns a context plus a deregister func to defer. CancelConnect cancels
+// whatever is currently registered, so chaining Connect → WaitForIndex through
+// this lets one cancel abort either step. Registering aborts any prior step
+// still holding the slot.
+func (c *Client) beginCancellable() (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	c.connectMu.Lock()
+	if c.connectCancel != nil {
+		c.connectCancel()
+	}
+	c.connectGen++
+	gen := c.connectGen
+	c.connectCancel = cancel
+	c.connectMu.Unlock()
+	return ctx, func() {
+		c.connectMu.Lock()
+		if c.connectGen == gen {
+			c.connectCancel = nil
+		}
+		c.connectMu.Unlock()
+		cancel()
+	}
 }
 
 // NewClient creates a Client from PEM-encoded certificate and private key.
@@ -95,23 +122,8 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string, status ConnectStatus
 	// Cancellation context for the whole dial sequence (discovery + the
 	// per-candidate dial loop) so CancelConnect can abort it promptly instead
 	// of letting it walk through every remaining address.
-	ctx, cancel := context.WithCancel(context.Background())
-	c.connectMu.Lock()
-	if c.connectCancel != nil {
-		c.connectCancel() // abort any prior in-flight Connect on this client
-	}
-	c.connectGen++
-	gen := c.connectGen
-	c.connectCancel = cancel
-	c.connectMu.Unlock()
-	defer func() {
-		c.connectMu.Lock()
-		if c.connectGen == gen {
-			c.connectCancel = nil
-		}
-		c.connectMu.Unlock()
-		cancel()
-	}()
+	ctx, deregister := c.beginCancellable()
+	defer deregister()
 
 	addrs, err := Discover(c.myID.String(), peerDeviceIDStr, 8)
 	if err != nil {
@@ -234,7 +246,12 @@ func (c *Client) WaitForIndex(folderID string, timeoutSecs int) error {
 	if model == nil {
 		return fmt.Errorf("not connected")
 	}
-	return model.waitForIndex(folderID, time.Duration(timeoutSecs)*time.Second)
+	// Register under the same cancel slot as Connect so CancelConnect aborts a
+	// cancel that lands while we're still waiting for the peer's index instead
+	// of leaving this blocking call running for the full timeout.
+	ctx, deregister := c.beginCancellable()
+	defer deregister()
+	return model.waitForIndex(ctx, folderID, time.Duration(timeoutSecs)*time.Second)
 }
 
 // IsConnected reports whether the BEP connection is currently live.
