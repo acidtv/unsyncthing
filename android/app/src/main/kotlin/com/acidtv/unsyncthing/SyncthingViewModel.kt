@@ -42,6 +42,7 @@ sealed class UiState {
         val folderID: String,
         val allEntries: List<FileEntry>,
         val currentDir: String = "",
+        val bookmarkName: String? = null,
     ) : UiState() {
         val entries: List<FileEntry> get() {
             val prefix = if (currentDir.isEmpty()) "" else "$currentDir/"
@@ -235,7 +236,8 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                     client = newClient
                 }
 
-                _state.postValue(UiState.FileList(folderID, entries))
+                val bookmarkName = bookmarkNameFor(_bookmarks.value ?: emptyList(), peerDeviceID, folderID)
+                _state.postValue(UiState.FileList(folderID, entries, bookmarkName = bookmarkName))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -467,6 +469,9 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     }
 
 }
+
+internal fun bookmarkNameFor(bookmarks: List<Bookmark>, peerID: String, folderID: String): String? =
+    bookmarks.firstOrNull { it.peerID == peerID && it.folderID == folderID }?.name
 
 internal fun upsertBookmark(existing: List<Bookmark>, new: Bookmark): List<Bookmark> {
     val idx = existing.indexOfFirst { it.peerID == new.peerID && it.folderID == new.folderID }
