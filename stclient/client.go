@@ -41,6 +41,16 @@ type Client struct {
 	conn        protocol.Connection
 	model       *peerModel
 	fetchCancel context.CancelFunc
+
+	// connectCancel aborts the dial loop of an in-flight Connect. It has its
+	// own mutex (not mu) because Connect holds mu for the whole dial loop, so
+	// CancelConnect must reach the cancel func without contending for mu.
+	// connectGen identifies which Connect owns the slot so a stale Connect's
+	// deferred cleanup doesn't clear a newer one's cancel func (func values
+	// aren't comparable, so we tag them with a generation counter instead).
+	connectMu     sync.Mutex
+	connectCancel context.CancelFunc
+	connectGen    uint64
 }
 
 // NewClient creates a Client from PEM-encoded certificate and private key.
@@ -82,9 +92,33 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string, status ConnectStatus
 		return fmt.Errorf("invalid peer device ID: %w", err)
 	}
 
+	// Cancellation context for the whole dial sequence (discovery + the
+	// per-candidate dial loop) so CancelConnect can abort it promptly instead
+	// of letting it walk through every remaining address.
+	ctx, cancel := context.WithCancel(context.Background())
+	c.connectMu.Lock()
+	if c.connectCancel != nil {
+		c.connectCancel() // abort any prior in-flight Connect on this client
+	}
+	c.connectGen++
+	gen := c.connectGen
+	c.connectCancel = cancel
+	c.connectMu.Unlock()
+	defer func() {
+		c.connectMu.Lock()
+		if c.connectGen == gen {
+			c.connectCancel = nil
+		}
+		c.connectMu.Unlock()
+		cancel()
+	}()
+
 	addrs, err := Discover(c.myID.String(), peerDeviceIDStr, 8)
 	if err != nil {
 		return fmt.Errorf("discover peer: %w", err)
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("connect cancelled")
 	}
 
 	c.mu.Lock()
@@ -114,10 +148,15 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string, status ConnectStatus
 	var dialErrs []string
 	var addr string
 	for _, candidate := range addrs {
+		// Bail before announcing the next candidate so a cancel mid-loop stops
+		// the "Connecting to <addr>…" updates rather than walking the rest.
+		if ctx.Err() != nil {
+			return fmt.Errorf("connect cancelled")
+		}
 		if status != nil {
 			status.OnDialing(displayAddr(candidate))
 		}
-		tc, scheme, derr := dialAndHandshake(candidate, peerID, c.cert, tlsConf)
+		tc, scheme, derr := dialAndHandshake(ctx, candidate, peerID, c.cert, tlsConf)
 		if derr != nil {
 			dialErrs = append(dialErrs, fmt.Sprintf("%s: %v", candidate, derr))
 			continue
@@ -230,6 +269,19 @@ func (c *Client) CancelFetch() {
 	}
 }
 
+// CancelConnect aborts an in-progress Connect, if any. No-op when idle.
+// The dial loop returns promptly with a "connect cancelled" error and any
+// in-flight dial/handshake is torn down via its context, so the caller stops
+// walking the remaining candidate addresses instead of churning through them.
+func (c *Client) CancelConnect() {
+	c.connectMu.Lock()
+	cancel := c.connectCancel
+	c.connectMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // snapshot returns the current connection and model atomically.
 func (c *Client) snapshot() (protocol.Connection, *peerModel) {
 	c.mu.Lock()
@@ -303,7 +355,7 @@ func (i *tlsConnInfo) ConnectionID() string     { return i.addr }
 // peerID is the device we're trying to reach — the relay broker needs it to
 // route the session. The TCP path doesn't use it (the address already
 // identifies the endpoint).
-func dialAndHandshake(candidate string, peerID protocol.DeviceID, cert tls.Certificate, tlsCfg *tls.Config) (*tls.Conn, string, error) {
+func dialAndHandshake(ctx context.Context, candidate string, peerID protocol.DeviceID, cert tls.Certificate, tlsCfg *tls.Config) (*tls.Conn, string, error) {
 	u, err := url.Parse(candidate)
 	if err != nil {
 		return nil, "", fmt.Errorf("parse address: %w", err)
@@ -316,9 +368,9 @@ func dialAndHandshake(candidate string, peerID protocol.DeviceID, cert tls.Certi
 	var isServer bool
 	switch u.Scheme {
 	case "tcp", "tcp4", "tcp6":
-		nc, err = net.DialTimeout("tcp", u.Host, dialTimeout)
+		nc, err = (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, "tcp", u.Host)
 	case "relay":
-		nc, isServer, err = dialRelay(u, peerID, cert)
+		nc, isServer, err = dialRelay(ctx, u, peerID, cert)
 	default:
 		return nil, "", fmt.Errorf("unsupported scheme %q", u.Scheme)
 	}
@@ -332,7 +384,9 @@ func dialAndHandshake(candidate string, peerID protocol.DeviceID, cert tls.Certi
 	} else {
 		tc = tls.Client(nc, tlsCfg)
 	}
-	if herr := tc.Handshake(); herr != nil {
+	// HandshakeContext aborts the handshake the moment the connect is
+	// cancelled, rather than blocking until the handshake deadline.
+	if herr := tc.HandshakeContext(ctx); herr != nil {
 		nc.Close()
 		return nil, "", fmt.Errorf("TLS handshake: %w", herr)
 	}

@@ -27,14 +27,17 @@ import (
 //
 // See lib/connections/relay_dial.go in the syncthing source for the
 // reference implementation.
-func dialRelay(uri *url.URL, peerID protocol.DeviceID, cert tls.Certificate) (net.Conn, bool, error) {
+func dialRelay(ctx context.Context, uri *url.URL, peerID protocol.DeviceID, cert tls.Certificate) (net.Conn, bool, error) {
 	// Step 1: ask the relay broker for a session invitation. Internally this
 	// dials the relay over TCP and does a bep-relay ALPN TLS handshake using
 	// our own client cert, verifying the relay's cert against ?id= on the
 	// URL. The conn JoinSession returns is plain TCP again.
-	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	//
+	// Both steps derive their timeout from the caller's ctx so a CancelConnect
+	// aborts an in-flight relay invite/join instead of waiting out dialTimeout.
+	inviteCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
-	inv, err := client.GetInvitationFromRelay(ctx, uri, peerID, []tls.Certificate{cert}, dialTimeout)
+	inv, err := client.GetInvitationFromRelay(inviteCtx, uri, peerID, []tls.Certificate{cert}, dialTimeout)
 	if err != nil {
 		return nil, false, fmt.Errorf("relay invite: %w", err)
 	}
@@ -42,7 +45,7 @@ func dialRelay(uri *url.URL, peerID protocol.DeviceID, cert tls.Certificate) (ne
 	// Step 2: connect to the relay's session port. JoinSession dials over
 	// TCP and exchanges the session key from the invitation; on success we
 	// get a net.Conn that carries traffic to the other peer.
-	joinCtx, joinCancel := context.WithTimeout(context.Background(), dialTimeout)
+	joinCtx, joinCancel := context.WithTimeout(ctx, dialTimeout)
 	defer joinCancel()
 	conn, err := client.JoinSession(joinCtx, inv)
 	if err != nil {
