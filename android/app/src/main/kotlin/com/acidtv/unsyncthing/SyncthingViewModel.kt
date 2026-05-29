@@ -97,6 +97,12 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     private var downloadJob: Job? = null
     private var connectJob: Job? = null
 
+    // Set when the user cancels a download so late OnProgress callbacks (the
+    // block already in flight when CancelFetch landed) don't re-show the footer
+    // after we've hidden it. Reset at the start of each fetchFile.
+    @Volatile
+    private var cancelRequested = false
+
     private val _state = MutableLiveData<UiState>(UiState.Idle)
     val state: LiveData<UiState> = _state
 
@@ -237,6 +243,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     fun fetchFile(folderID: String, filePath: String): Boolean {
         if (downloadJob?.isActive == true) return false
         val c = synchronized(lock) { client } ?: return false
+        cancelRequested = false
 
         downloadJob = viewModelScope.launch(Dispatchers.IO) {
             _download.postValue(DownloadProgress(filePath, 0, -1))
@@ -261,6 +268,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 c.fetchFile(folderID, filePath, dest.absolutePath, object : FetchProgress {
                     override fun onProgress(downloaded: Long, total: Long) {
+                        if (cancelRequested) return
                         _download.postValue(DownloadProgress(filePath, downloaded, total))
                     }
                     override fun onDone(localPath: String) {
@@ -279,6 +287,12 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                         _errorEvent.postValue(msg)
                     }
                 })
+                // FetchFile has returned, so no further progress callbacks can
+                // fire (OnProgress runs synchronously inside the blocking call).
+                // The cancel path fires neither OnDone nor OnError, so clear the
+                // footer here to guarantee it hides; harmless on the success
+                // path where OnDone already cleared it.
+                _download.postValue(null)
             } catch (e: CancellationException) {
                 _download.postValue(null)
                 throw e
@@ -296,6 +310,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     fun cancelDownload() {
         if (downloadJob?.isActive != true) return
         val c = synchronized(lock) { client }
+        cancelRequested = true
         _download.postValue(null)
         viewModelScope.launch(Dispatchers.IO) {
             c?.cancelFetch()
