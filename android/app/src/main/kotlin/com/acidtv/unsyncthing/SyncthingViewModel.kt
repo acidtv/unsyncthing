@@ -78,6 +78,16 @@ data class DownloadProgress(val path: String, val downloaded: Long, val total: L
 
 data class DownloadCompleted(val displayName: String, val uri: Uri, val mimeType: String)
 
+// One-shot signal that a previewed file finished fetching and is ready to open.
+// Preview progress and errors flow through the shared `_download`/`_errorEvent`
+// channels so the existing bottom footer (and its cancel button) drive previews
+// exactly like a regular download.
+data class PreviewReady(
+    val name: String,
+    val type: PreviewType,
+    val file: File,
+)
+
 data class Bookmark(val name: String, val peerID: String, val folderID: String)
 
 private data class CertData(
@@ -90,6 +100,9 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
 
     private val prefs = app.getSharedPreferences("unsyncthing", Context.MODE_PRIVATE)
     private val gson = Gson()
+
+    // Temporary, TTL-limited cache for previewed files (app cache dir).
+    private val previewCache = PreviewCache(File(app.cacheDir, "preview"))
 
     // All client/cert mutation goes through `lock`.
     private val lock = Any()
@@ -145,6 +158,11 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _bookmarks = MutableLiveData<List<Bookmark>>(loadBookmarks())
     val bookmarks: LiveData<List<Bookmark>> = _bookmarks
+
+    // Single-shot: emitted when a preview fetch completes so the UI can open the
+    // preview screen. The Activity/fragment acknowledges it after navigating.
+    private val _previewReady = MutableLiveData<PreviewReady?>(null)
+    val previewReady: LiveData<PreviewReady?> = _previewReady
 
     init {
         // Generate the cert off the main thread so the very first launch
@@ -358,6 +376,99 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // Fetch a file into the temporary preview cache, then signal the UI to open
+    // the preview screen. A fresh cache hit skips the download. Progress and the
+    // cancel button reuse the shared `_download` footer; errors reuse
+    // `_errorEvent`. Shares `downloadJob`/`cancelGuard` with fetchFile so preview
+    // and save never run concurrently (the Go client serves one fetch at a
+    // time). Returns false if a download/preview is already in flight.
+    fun startPreview(folderID: String, entry: FileEntry, type: PreviewType): Boolean {
+        if (downloadJob?.isActive == true) return false
+        val c = synchronized(lock) { client } ?: return false
+        cancelGuard.arm()
+
+        downloadJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                previewCache.ensureDir()
+                previewCache.sweep(PREVIEW_TTL_MS)
+                val dest = previewCache.resolve(
+                    previewCache.key(folderID, entry.path, entry.modified, entry.size),
+                )
+
+                if (previewCache.isFresh(dest, PREVIEW_TTL_MS)) {
+                    previewCache.touch(dest)
+                    _previewReady.postValue(PreviewReady(entry.name, type, dest))
+                    return@launch
+                }
+
+                // Only now (an actual fetch) show the footer, so an instant
+                // cache hit doesn't flash it.
+                _download.postValue(DownloadProgress(entry.path, 0, -1))
+
+                // BEP connections can drop between operations; reconnect
+                // transparently so a preview doesn't fail on a stale connection.
+                if (!c.isConnected) {
+                    val saved = savedConnection()
+                        ?: throw IllegalStateException("connection lost; please reconnect")
+                    val (peerID, folder) = saved
+                    withMulticastLock { c.connect(peerID, folder, null) }
+                    c.waitForIndex(folder, 30)
+                }
+
+                // Download to a .part file and rename on success so a partial
+                // transfer is never mistaken for a complete cache entry.
+                val part = File(dest.absolutePath + ".part")
+                c.fetchFile(folderID, entry.path, part.absolutePath, object : FetchProgress {
+                    override fun onProgress(downloaded: Long, total: Long) {
+                        if (!cancelGuard.progressAllowed()) return
+                        _download.postValue(DownloadProgress(entry.path, downloaded, total))
+                    }
+                    override fun onDone(localPath: String) {
+                        val src = File(localPath)
+                        dest.delete() // clear any stale entry so renameTo can't fail on it
+                        _download.postValue(null)
+                        if (src.renameTo(dest)) {
+                            _previewReady.postValue(PreviewReady(entry.name, type, dest))
+                        } else {
+                            src.delete()
+                            _errorEvent.postValue("Could not cache preview")
+                        }
+                    }
+                    override fun onError(msg: String) {
+                        part.delete()
+                        _download.postValue(null)
+                        _errorEvent.postValue(msg)
+                    }
+                })
+                // Cancel fires neither callback; clear the footer as a safety net.
+                _download.postValue(null)
+            } catch (e: CancellationException) {
+                _download.postValue(null)
+                throw e
+            } catch (e: Exception) {
+                _download.postValue(null)
+                _errorEvent.postValue(e.message ?: "Preview failed")
+            }
+        }
+        return true
+    }
+
+    fun acknowledgePreviewReady() {
+        _previewReady.value = null
+    }
+
+    // Save an already-cached previewed file to Downloads without re-fetching it.
+    fun savePreviewToDownloads(cachedPath: String, displayName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val result = copyToDownloads(File(cachedPath), sanitizeFilename(displayName))
+                _completed.postValue(result)
+            } catch (e: Exception) {
+                _errorEvent.postValue("Save to Downloads failed: ${e.message}")
+            }
+        }
+    }
+
     fun refreshListing() {
         val current = _state.value as? UiState.FileList ?: return
         val c = synchronized(lock) { client } ?: return
@@ -414,6 +525,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         _completed.value = null
         _errorEvent.value = null
         _cancelledEvent.value = null
+        _previewReady.value = null
     }
 
     override fun onCleared() {
@@ -477,8 +589,10 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun copyToDownloads(src: File, displayName: String): DownloadCompleted {
+        // Infer MIME from the display name's extension, not the source file:
+        // preview cache files have a hashed, extension-less name.
         val mime = MimeTypeMap.getSingleton()
-            .getMimeTypeFromExtension(src.extension.lowercase())
+            .getMimeTypeFromExtension(displayName.substringAfterLast('.', "").lowercase())
             ?: "application/octet-stream"
 
         val resolver = getApplication<Application>().contentResolver

@@ -28,7 +28,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showFragment(tag: String) {
-        if (supportFragmentManager.findFragmentById(R.id.fragmentContainer)?.tag == tag) return
+        val current = supportFragmentManager.findFragmentById(R.id.fragmentContainer)
+        if (current?.tag == tag) return
+        // The preview sits on the back stack above the file list. A FileList
+        // state update (e.g. a save-to-Downloads progress tick) must not
+        // replace it — popping the preview restores the list from `_state`.
+        if (current is PreviewFragment && tag == TAG_FILE_LIST) return
         val fragment: Fragment = when (tag) {
             TAG_FILE_LIST -> FileListFragment()
             else -> ConnectFragment()

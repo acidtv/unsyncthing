@@ -11,6 +11,7 @@ import java.text.StringCharacterIterator
 
 class FileListAdapter(
     private val onTap: (FileEntry) -> Unit,
+    private val onLongPress: (FileEntry) -> Unit = {},
 ) : ListAdapter<FileEntry, FileListAdapter.VH>(DIFF) {
 
     inner class VH(val binding: ItemFileBinding) : RecyclerView.ViewHolder(binding.root)
@@ -25,6 +26,14 @@ class FileListAdapter(
         holder.binding.tvMeta.text = if (entry.isDir) "folder" else humanReadableBytes(entry.size)
         holder.binding.tvIcon.text = if (entry.isDir) "📁" else "📄"
         holder.itemView.setOnClickListener { onTap(entry) }
+        holder.itemView.setOnLongClickListener {
+            if (entry.isDir) {
+                false
+            } else {
+                onLongPress(entry)
+                true
+            }
+        }
     }
 
     companion object {
