@@ -37,4 +37,13 @@
 
     </ScrollView>
 
+    <com.acidtv.unsyncthing.ZoomableImageView
+        android:id="@+id/imageView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:visibility="gone"
+        android:background="@android:color/black"
+        android:contentDescription="@string/preview_image_desc" />
+
 </LinearLayout>

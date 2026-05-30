@@ -33,3 +33,8 @@
    - [ ] Staleness: cache keys on path+modified+size, so the rare case of an edited peer file with unchanged modified/size serves stale content until the TTL sweep.
    - [ ] Encoding is assumed UTF-8 and the type is decided by extension only — non-UTF-8 text renders garbled and a binary file mislabeled with a text extension shows as garbage. Consider content sniffing + encoding detection.
    - [ ] Rendering up to 5 MB in one `TextView` can be janky to scroll on large files; consider paging/virtualised text for big files.
+ - [ ] Image preview (`PreviewType.IMAGE`, `ZoomableImageView`) — limitations of the initial implementation:
+   - [ ] Images skip the 5 MB preview cap, but the Go layer still has no byte-range fetch, so the whole image file downloads over BEP before it can be shown — large images cost bandwidth and preview-cache space even though the decoded bitmap is memory-bounded.
+   - [ ] Decode is bounded with `inSampleSize` against `maxDim` (4096 px longest edge) to avoid OOM; very large images are downsampled, so zooming in past that size shows downsampled pixels rather than full detail. A tiled `BitmapRegionDecoder` approach would allow full-resolution zoom.
+   - [ ] GIFs render their first frame only — `BitmapFactory` doesn't animate, and the builtin-only constraint precludes an animated decoder.
+   - [ ] `ZoomableImageView` double-tap snaps (no zoom animation) and there's no fling/momentum panning; both are cosmetic.

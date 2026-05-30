@@ -158,7 +158,7 @@ class FileListFragment : Fragment() {
             Snackbar.make(binding.root, "Can't preview this file type", Snackbar.LENGTH_SHORT).show()
             return
         }
-        if (entry.size > MAX_PREVIEW_BYTES) {
+        if (type == PreviewType.TEXT && entry.size > MAX_PREVIEW_BYTES) {
             Snackbar.make(binding.root, "File too large to preview (max 5 MB)", Snackbar.LENGTH_SHORT).show()
             return
         }

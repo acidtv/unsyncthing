@@ -1,9 +1,9 @@
 package com.acidtv.unsyncthing
 
-// Supported in-app preview kinds. Text/code is the only one for now; future
-// kinds (images, PDFs, …) get a new entry here, an extension set in
-// [Previewers], and a render branch in PreviewFragment.
-enum class PreviewType { TEXT }
+// Supported in-app preview kinds. Each kind gets an entry here, an extension
+// set in [Previewers], and a render branch in PreviewFragment. Future kinds
+// (PDFs, …) follow the same pattern.
+enum class PreviewType { TEXT, IMAGE }
 
 // Largest file we'll fetch for preview. The Go layer has no byte-range fetch,
 // so the whole file is downloaded — cap it so previews stay cheap. Bigger files
@@ -38,12 +38,19 @@ object Previewers {
         "changelog", "authors", "notice", "copying", "todo",
     )
 
+    // Raster formats the platform BitmapFactory can decode. webp/heic/heif are
+    // supported from the app's minSdk (29). GIFs render their first frame only.
+    private val IMAGE_EXTENSIONS = setOf(
+        "jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif",
+    )
+
     fun typeFor(entry: FileEntry): PreviewType? = typeFor(entry.name)
 
     fun typeFor(name: String): PreviewType? {
         val basename = name.substringAfterLast('/').substringAfterLast('\\')
         val ext = basename.substringAfterLast('.', "").lowercase()
         if (ext in TEXT_EXTENSIONS) return PreviewType.TEXT
+        if (ext in IMAGE_EXTENSIONS) return PreviewType.IMAGE
         if (basename.lowercase() in TEXT_FILENAMES) return PreviewType.TEXT
         return null
     }
