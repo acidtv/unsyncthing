@@ -1,5 +1,9 @@
 package com.acidtv.unsyncthing
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
@@ -14,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import kotlin.math.max
 
 // Full-screen preview of a single file. The file has already been fetched into
 // the preview cache (progress/cancel are shown on the file list's bottom
@@ -79,6 +84,18 @@ class PreviewFragment : Fragment() {
                     binding.tvContent.text = text
                 }
             }
+            PreviewType.IMAGE -> {
+                binding.imageView.visibility = View.VISIBLE
+                viewLifecycleOwner.lifecycleScope.launch {
+                    val bmp = withContext(Dispatchers.IO) { decodeBounded(cachedPath) }
+                    if (bmp != null) {
+                        binding.imageView.setImageBitmap(bmp)
+                        binding.imageView.resetForNewImage()
+                    } else {
+                        Snackbar.make(binding.root, "Could not load image", Snackbar.LENGTH_LONG).show()
+                    }
+                }
+            }
         }
     }
 
@@ -88,6 +105,46 @@ class PreviewFragment : Fragment() {
         } catch (e: Exception) {
             "Could not read file: ${e.message}"
         }
+
+    // Decode without a byte cap (images skip the text previewer's 5 MB limit).
+    // Pass 1 reads bounds only; pass 2 downsamples by a power-of-two so the
+    // longest edge is <= maxDim, keeping the in-memory bitmap bounded no matter
+    // how large the file is. ZoomableImageView magnifies via its matrix on zoom.
+    private fun decodeBounded(path: String, maxDim: Int = 4096): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        var sample = 1
+        val longest = max(bounds.outWidth, bounds.outHeight)
+        while (longest / sample > maxDim) sample *= 2
+
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        val bmp = BitmapFactory.decodeFile(path, opts) ?: return null
+        return applyExifRotation(path, bmp)
+    }
+
+    // JPEGs may carry an EXIF orientation; rotate to display upright. A no-op
+    // (try/catch) for formats without EXIF.
+    private fun applyExifRotation(path: String, bmp: Bitmap): Bitmap {
+        val degrees = try {
+            when (ExifInterface(path).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL,
+            )) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                else -> 0f
+            }
+        } catch (e: Exception) {
+            0f
+        }
+        if (degrees == 0f) return bmp
+        val m = Matrix().apply { postRotate(degrees) }
+        val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+        if (rotated != bmp) bmp.recycle()
+        return rotated
+    }
 
     override fun onDestroyView() {
         super.onDestroyView()

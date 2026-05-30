@@ -35,8 +35,15 @@ class PreviewersTest {
     }
 
     @Test
+    fun recognisesImageExtensions() {
+        for (n in listOf("photo.png", "pic.JPG", "scan.jpeg", "anim.gif",
+                         "img.webp", "old.bmp", "phone.heic", "x.heif")) {
+            assertEquals("expected IMAGE for $n", PreviewType.IMAGE, Previewers.typeFor(entry(n)))
+        }
+    }
+
+    @Test
     fun rejectsBinaryAndUnknownTypes() {
-        assertNull(Previewers.typeFor(entry("photo.png")))
         assertNull(Previewers.typeFor(entry("archive.zip")))
         assertNull(Previewers.typeFor(entry("noextension")))
         assertNull(Previewers.typeFor(entry("clip.mp4")))
