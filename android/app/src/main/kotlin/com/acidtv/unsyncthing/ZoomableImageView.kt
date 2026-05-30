@@ -8,7 +8,6 @@ import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import androidx.appcompat.widget.AppCompatImageView
-import kotlin.math.max
 import kotlin.math.min
 
 // Pinch-zoom / pan / double-tap image view built on platform APIs only
@@ -125,15 +124,17 @@ class ZoomableImageView @JvmOverloads constructor(
         matrix_.mapRect(rect)
         val vw = width.toFloat()
         val vh = height.toFloat()
-        val dx = if (rect.width() <= vw) {
-            (vw - rect.width()) / 2f - rect.left
-        } else {
-            max(min(0f, vw - rect.right), -rect.left)
+        val dx = when {
+            rect.width() <= vw -> (vw - rect.width()) / 2f - rect.left
+            rect.left > 0 -> -rect.left
+            rect.right < vw -> vw - rect.right
+            else -> 0f
         }
-        val dy = if (rect.height() <= vh) {
-            (vh - rect.height()) / 2f - rect.top
-        } else {
-            max(min(0f, vh - rect.bottom), -rect.top)
+        val dy = when {
+            rect.height() <= vh -> (vh - rect.height()) / 2f - rect.top
+            rect.top > 0 -> -rect.top
+            rect.bottom < vh -> vh - rect.bottom
+            else -> 0f
         }
         matrix_.postTranslate(dx, dy)
     }
