@@ -124,6 +124,22 @@ class FileListFragment : Fragment() {
             Snackbar.make(binding.root, "Download cancelled", Snackbar.LENGTH_SHORT).show()
             vm.acknowledgeCancelled()
         }
+
+        // A preview fetch finished (or hit a fresh cache entry) — open the
+        // preview screen. Consumed immediately so popping back doesn't re-open.
+        vm.previewReady.observe(viewLifecycleOwner) { ready ->
+            if (ready == null) return@observe
+            vm.acknowledgePreviewReady()
+            parentFragmentManager.commit {
+                setReorderingAllowed(true)
+                replace(
+                    R.id.fragmentContainer,
+                    PreviewFragment.newInstance(ready.name, ready.file.absolutePath, ready.type),
+                    "preview",
+                )
+                addToBackStack(null)
+            }
+        }
     }
 
     override fun onDestroyView() {
@@ -131,8 +147,10 @@ class FileListFragment : Fragment() {
         _binding = null
     }
 
-    // Tap → preview. Unsupported or oversized files surface a Snackbar and
-    // don't navigate; saving stays available via long-press.
+    // Tap → fetch into the preview cache. Progress shows in the shared bottom
+    // footer (with its cancel button); the screen opens once the file is ready
+    // (see the previewReady observer). Unsupported or oversized files surface a
+    // Snackbar and don't fetch; saving stays available via long-press.
     private fun openPreview(entry: FileEntry) {
         val state = vm.state.value as? UiState.FileList ?: return
         val type = Previewers.typeFor(entry)
@@ -146,12 +164,6 @@ class FileListFragment : Fragment() {
         }
         if (!vm.startPreview(state.folderID, entry, type)) {
             Toast.makeText(requireContext(), "Busy — try again in a moment", Toast.LENGTH_SHORT).show()
-            return
-        }
-        parentFragmentManager.commit {
-            setReorderingAllowed(true)
-            replace(R.id.fragmentContainer, PreviewFragment.newInstance(state.folderID, entry.path, entry.name), "preview")
-            addToBackStack(null)
         }
     }
 

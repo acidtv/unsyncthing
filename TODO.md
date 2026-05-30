@@ -32,5 +32,4 @@
    - [ ] Preview cache TTL cleanup is best-effort: `PreviewCache.sweep` only runs opportunistically when a preview starts (no background timer), so entries can outlive the 24 h TTL until the next preview. Conversely Android may evict a still-fresh entry from `cacheDir` under storage pressure, forcing an early re-download.
    - [ ] Staleness: cache keys on path+modified+size, so the rare case of an edited peer file with unchanged modified/size serves stale content until the TTL sweep.
    - [ ] Encoding is assumed UTF-8 and the type is decided by extension only — non-UTF-8 text renders garbled and a binary file mislabeled with a text extension shows as garbage. Consider content sniffing + encoding detection.
-   - [ ] Backing out of an in-progress preview doesn't cancel the fetch (no cancel button in the preview screen); the download runs to completion and caches. The job guard then blocks the next tap until it finishes.
    - [ ] Rendering up to 5 MB in one `TextView` can be janky to scroll on large files; consider paging/virtualised text for big files.

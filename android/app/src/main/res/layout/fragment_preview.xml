@@ -12,14 +12,6 @@
         app:navigationIcon="@drawable/ic_close"
         app:menu="@menu/menu_preview" />
 
-    <com.google.android.material.progressindicator.LinearProgressIndicator
-        android:id="@+id/progressPreview"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:indeterminate="true"
-        android:visibility="gone"
-        app:trackCornerRadius="4dp" />
-
     <ScrollView
         android:id="@+id/textScroll"
         android:layout_width="match_parent"

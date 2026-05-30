@@ -7,26 +7,27 @@ import android.view.ViewGroup
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
+import androidx.lifecycle.lifecycleScope
 import com.acidtv.unsyncthing.databinding.FragmentPreviewBinding
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import androidx.lifecycle.lifecycleScope
 import java.io.File
 
-// Full-screen preview of a single file. Tap-to-preview pushes this fragment;
-// the file is fetched into the temporary cache and rendered by kind (text for
-// now). Saving to Downloads remains available from the toolbar menu.
+// Full-screen preview of a single file. The file has already been fetched into
+// the preview cache (progress/cancel are shown on the file list's bottom
+// footer before this screen opens), so this fragment just renders it by kind
+// (text for now). Saving to Downloads reuses the cached copy — no re-fetch.
 class PreviewFragment : Fragment() {
 
     private val vm: SyncthingViewModel by activityViewModels()
     private var _binding: FragmentPreviewBinding? = null
     private val binding get() = _binding!!
 
-    private val folderID get() = requireArguments().getString(ARG_FOLDER, "")
-    private val path get() = requireArguments().getString(ARG_PATH, "")
     private val name get() = requireArguments().getString(ARG_NAME, "")
+    private val cachedPath get() = requireArguments().getString(ARG_FILE, "")
+    private val type get() = PreviewType.valueOf(requireArguments().getString(ARG_TYPE, PreviewType.TEXT.name))
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -46,37 +47,10 @@ class PreviewFragment : Fragment() {
         binding.toolbar.setNavigationOnClickListener { parentFragmentManager.popBackStack() }
         binding.toolbar.setOnMenuItemClickListener { item ->
             if (item.itemId == R.id.action_save) {
-                if (!vm.fetchFile(folderID, path)) {
-                    Snackbar.make(binding.root, "Busy — try again in a moment", Snackbar.LENGTH_SHORT).show()
-                }
+                vm.savePreviewToDownloads(cachedPath, name)
                 true
             } else {
                 false
-            }
-        }
-
-        vm.preview.observe(viewLifecycleOwner) { state ->
-            when (state) {
-                is PreviewState.Loading -> {
-                    binding.textScroll.visibility = View.GONE
-                    // Set the mode before making the bar visible: the Material
-                    // indicator throws if switched *to* indeterminate while shown.
-                    if (state.total > 0) {
-                        binding.progressPreview.isIndeterminate = false
-                        binding.progressPreview.setProgressCompat(
-                            (state.downloaded * 100 / state.total).toInt(), true,
-                        )
-                    } else {
-                        binding.progressPreview.isIndeterminate = true
-                    }
-                    binding.progressPreview.visibility = View.VISIBLE
-                }
-                is PreviewState.Ready -> render(state)
-                is PreviewState.Failed -> {
-                    Snackbar.make(binding.root, state.message, Snackbar.LENGTH_LONG).show()
-                    parentFragmentManager.popBackStack()
-                }
-                null -> {}
             }
         }
 
@@ -92,15 +66,16 @@ class PreviewFragment : Fragment() {
             Snackbar.make(binding.root, msg, Snackbar.LENGTH_LONG).show()
             vm.acknowledgeError()
         }
+
+        render()
     }
 
-    private fun render(state: PreviewState.Ready) {
-        binding.progressPreview.visibility = View.GONE
-        when (state.type) {
+    private fun render() {
+        when (type) {
             PreviewType.TEXT -> {
                 binding.textScroll.visibility = View.VISIBLE
                 viewLifecycleOwner.lifecycleScope.launch {
-                    val text = withContext(Dispatchers.IO) { readText(state.file) }
+                    val text = withContext(Dispatchers.IO) { readText(File(cachedPath)) }
                     binding.tvContent.text = text
                 }
             }
@@ -117,21 +92,21 @@ class PreviewFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
         (activity as? AppCompatActivity)?.supportActionBar?.show()
-        vm.clearPreview()
         _binding = null
     }
 
     companion object {
-        private const val ARG_FOLDER = "folder"
-        private const val ARG_PATH = "path"
         private const val ARG_NAME = "name"
+        private const val ARG_FILE = "file"
+        private const val ARG_TYPE = "type"
 
-        fun newInstance(folderID: String, path: String, name: String) = PreviewFragment().apply {
-            arguments = Bundle().apply {
-                putString(ARG_FOLDER, folderID)
-                putString(ARG_PATH, path)
-                putString(ARG_NAME, name)
+        fun newInstance(name: String, cachedPath: String, type: PreviewType) =
+            PreviewFragment().apply {
+                arguments = Bundle().apply {
+                    putString(ARG_NAME, name)
+                    putString(ARG_FILE, cachedPath)
+                    putString(ARG_TYPE, type.name)
+                }
             }
-        }
     }
 }
