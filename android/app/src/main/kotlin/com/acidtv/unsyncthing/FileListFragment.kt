@@ -15,6 +15,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.core.view.MenuProvider
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
+import androidx.fragment.app.commit
 import androidx.lifecycle.Lifecycle
 import androidx.recyclerview.widget.DividerItemDecoration
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -38,18 +39,12 @@ class FileListFragment : Fragment() {
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        adapter = FileListAdapter { entry ->
-            if (entry.isDir) {
-                vm.navigateInto(entry.path)
-                return@FileListAdapter
-            }
-            val state = vm.state.value
-            if (state is UiState.FileList) {
-                if (!vm.fetchFile(state.folderID, entry.path)) {
-                    Toast.makeText(requireContext(), "Download already in progress", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
+        adapter = FileListAdapter(
+            onTap = { entry ->
+                if (entry.isDir) vm.navigateInto(entry.path) else openPreview(entry)
+            },
+            onLongPress = { entry -> showFileMenu(entry) },
+        )
 
         binding.recycler.apply {
             layoutManager = LinearLayoutManager(requireContext())
@@ -134,6 +129,46 @@ class FileListFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
         _binding = null
+    }
+
+    // Tap → preview. Unsupported or oversized files surface a Snackbar and
+    // don't navigate; saving stays available via long-press.
+    private fun openPreview(entry: FileEntry) {
+        val state = vm.state.value as? UiState.FileList ?: return
+        val type = Previewers.typeFor(entry)
+        if (type == null) {
+            Snackbar.make(binding.root, "Can't preview this file type", Snackbar.LENGTH_SHORT).show()
+            return
+        }
+        if (entry.size > MAX_PREVIEW_BYTES) {
+            Snackbar.make(binding.root, "File too large to preview (max 5 MB)", Snackbar.LENGTH_SHORT).show()
+            return
+        }
+        if (!vm.startPreview(state.folderID, entry, type)) {
+            Toast.makeText(requireContext(), "Busy — try again in a moment", Toast.LENGTH_SHORT).show()
+            return
+        }
+        parentFragmentManager.commit {
+            setReorderingAllowed(true)
+            replace(R.id.fragmentContainer, PreviewFragment.newInstance(state.folderID, entry.path, entry.name), "preview")
+            addToBackStack(null)
+        }
+    }
+
+    // Long-press → save to Downloads (the old tap behaviour).
+    private fun showFileMenu(entry: FileEntry) {
+        val state = vm.state.value as? UiState.FileList ?: return
+        val anchor = binding.recycler
+        androidx.appcompat.widget.PopupMenu(requireContext(), anchor).apply {
+            menu.add("Save to Downloads")
+            setOnMenuItemClickListener {
+                if (!vm.fetchFile(state.folderID, entry.path)) {
+                    Toast.makeText(requireContext(), "Download already in progress", Toast.LENGTH_SHORT).show()
+                }
+                true
+            }
+            show()
+        }
     }
 
     private fun openFile(uri: Uri, mimeType: String) {
