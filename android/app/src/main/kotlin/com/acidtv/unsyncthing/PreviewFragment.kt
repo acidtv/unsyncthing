@@ -15,6 +15,7 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.acidtv.unsyncthing.databinding.FragmentPreviewBinding
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.Dispatchers
@@ -112,7 +113,7 @@ class PreviewFragment : Fragment() {
     // rendered to a bitmap on demand off the main thread (see PdfPageAdapter). No
     // size cap applies — the RecyclerView only holds the visible pages in memory.
     private fun renderPdf() {
-        binding.pdfView.visibility = View.VISIBLE
+        binding.pdfContainer.visibility = View.VISIBLE
         binding.pdfView.layoutManager = LinearLayoutManager(requireContext())
         try {
             val fd = ParcelFileDescriptor.open(File(cachedPath), ParcelFileDescriptor.MODE_READ_ONLY)
@@ -126,9 +127,34 @@ class PreviewFragment : Fragment() {
                     binding.pdfView.width - binding.pdfView.paddingStart - binding.pdfView.paddingEnd
                 },
             )
+            // Live "page / total" readout that tracks scrolling. Posted once the
+            // first layout pass has placed the pages.
+            binding.pdfView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) = updatePageIndicator()
+            })
+            binding.pdfView.post { updatePageIndicator() }
         } catch (e: IOException) {
             Snackbar.make(binding.root, "Could not open PDF", Snackbar.LENGTH_LONG).show()
         }
+    }
+
+    // Show the page nearest the vertical centre of the viewport, 1-based, over
+    // the total page count. Based on the list's own (unzoomed) scroll position.
+    private fun updatePageIndicator() {
+        val binding = _binding ?: return
+        val total = pdfRenderer?.pageCount ?: return
+        val rv = binding.pdfView
+        val centerY = rv.height / 2
+        var page = (rv.layoutManager as? LinearLayoutManager)?.findFirstVisibleItemPosition() ?: 0
+        for (i in 0 until rv.childCount) {
+            val child = rv.getChildAt(i)
+            if (child.top <= centerY && child.bottom >= centerY) {
+                val pos = rv.getChildAdapterPosition(child)
+                if (pos != RecyclerView.NO_POSITION) page = pos
+                break
+            }
+        }
+        binding.pageIndicator.text = "${page.coerceAtLeast(0) + 1} / $total"
     }
 
     private fun readText(file: File): String =

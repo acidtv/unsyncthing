@@ -43,4 +43,5 @@
    - [ ] Pages render with the platform `android.graphics.pdf.PdfRenderer` (builtin-only); it draws vector content but doesn't expose selectable text, a text layer, links, or form fields.
    - [ ] Each page bitmap is rendered at `OVERSAMPLE` (2×) view width for crisp zoom; very tall/large pages can use significant memory, and zooming past 2× upscales (soft). A tiled re-render at the current zoom would give full detail with less memory.
    - [ ] `ZoomableRecyclerView` pan while zoomed is bounded to the current viewport — you can't scroll through the document while zoomed in; zoom back to 1× to scroll between pages. No fling/momentum or zoom animation.
+   - [ ] The "page / total" indicator and the scrollbar both track the list's own (unzoomed) scroll position, so while zoomed in the reported page can be slightly off from what's centred on screen.
    - [ ] Build/tests not run in the remote container (no Android SDK/AAR); only the `Previewers` classifier is JVM-unit-tested. Build & smoke-test rendering/zoom locally before shipping.
