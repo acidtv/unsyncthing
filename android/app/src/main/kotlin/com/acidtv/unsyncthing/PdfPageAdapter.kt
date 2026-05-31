@@ -46,7 +46,7 @@ class PdfPageAdapter(
         scope.launch {
             val bmp = withContext(Dispatchers.IO) { renderPage(position, width) }
             // Drop the result if this holder was rebound to another page.
-            if (bmp != null && holder.bindingAdapterPosition == position) {
+            if (bmp != null && holder.adapterPosition == position) {
                 holder.binding.pageImage.setImageBitmap(bmp)
             }
         }
