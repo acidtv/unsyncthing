@@ -3,8 +3,10 @@ package com.acidtv.unsyncthing
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.graphics.pdf.PdfRenderer
 import android.media.ExifInterface
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -12,12 +14,14 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.LinearLayoutManager
 import com.acidtv.unsyncthing.databinding.FragmentPreviewBinding
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 import kotlin.math.max
 
 // Full-screen preview of a single file. The file has already been fetched into
@@ -29,6 +33,10 @@ class PreviewFragment : Fragment() {
     private val vm: SyncthingViewModel by activityViewModels()
     private var _binding: FragmentPreviewBinding? = null
     private val binding get() = _binding!!
+
+    // PDF rendering owns native resources released in onDestroyView.
+    private var pdfRenderer: PdfRenderer? = null
+    private var pdfFd: ParcelFileDescriptor? = null
 
     private val name get() = requireArguments().getString(ARG_NAME, "")
     private val cachedPath get() = requireArguments().getString(ARG_FILE, "")
@@ -96,6 +104,30 @@ class PreviewFragment : Fragment() {
                     }
                 }
             }
+            PreviewType.PDF -> renderPdf()
+        }
+    }
+
+    // Open the cached PDF and feed its pages to a recycling adapter. Each page is
+    // rendered to a bitmap on demand off the main thread (see PdfPageAdapter). No
+    // size cap applies — the RecyclerView only holds the visible pages in memory.
+    private fun renderPdf() {
+        binding.pdfView.visibility = View.VISIBLE
+        binding.pdfView.layoutManager = LinearLayoutManager(requireContext())
+        try {
+            val fd = ParcelFileDescriptor.open(File(cachedPath), ParcelFileDescriptor.MODE_READ_ONLY)
+            val renderer = PdfRenderer(fd)
+            pdfFd = fd
+            pdfRenderer = renderer
+            binding.pdfView.adapter = PdfPageAdapter(
+                renderer = renderer,
+                scope = viewLifecycleOwner.lifecycleScope,
+                targetWidthProvider = {
+                    binding.pdfView.width - binding.pdfView.paddingStart - binding.pdfView.paddingEnd
+                },
+            )
+        } catch (e: IOException) {
+            Snackbar.make(binding.root, "Could not open PDF", Snackbar.LENGTH_LONG).show()
         }
     }
 
@@ -149,6 +181,14 @@ class PreviewFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
         (activity as? AppCompatActivity)?.supportActionBar?.show()
+        // Release native PDF resources: stop binds, then close renderer, then fd.
+        // In-flight render coroutines die with the view scope; PdfPageAdapter's
+        // lock + try/catch absorb any close race.
+        binding.pdfView.adapter = null
+        pdfRenderer?.close()
+        pdfRenderer = null
+        pdfFd?.close()
+        pdfFd = null
         _binding = null
     }
 

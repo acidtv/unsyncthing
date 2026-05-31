@@ -43,6 +43,21 @@ class PreviewersTest {
     }
 
     @Test
+    fun recognisesPdfExtension() {
+        assertEquals(PreviewType.PDF, Previewers.typeFor(entry("report.pdf")))
+    }
+
+    @Test
+    fun pdfExtensionMatchIsCaseInsensitive() {
+        assertEquals(PreviewType.PDF, Previewers.typeFor(entry("REPORT.PDF")))
+    }
+
+    @Test
+    fun pdfUsesBasenameNotDirectoryPath() {
+        assertEquals(PreviewType.PDF, Previewers.typeFor("a.txt/sub/doc.pdf"))
+    }
+
+    @Test
     fun rejectsBinaryAndUnknownTypes() {
         assertNull(Previewers.typeFor(entry("archive.zip")))
         assertNull(Previewers.typeFor(entry("noextension")))
