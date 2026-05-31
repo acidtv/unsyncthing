@@ -2,4 +2,5 @@
 <resources>
     <string name="app_name">unsyncthing</string>
     <string name="preview_image_desc">Image preview</string>
+    <string name="preview_pdf_page_desc">PDF page</string>
 </resources>

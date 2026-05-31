@@ -46,4 +46,33 @@
         android:background="@android:color/black"
         android:contentDescription="@string/preview_image_desc" />
 
+    <FrameLayout
+        android:id="@+id/pdfContainer"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:visibility="gone">
+
+        <com.acidtv.unsyncthing.ZoomableRecyclerView
+            android:id="@+id/pdfView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:padding="8dp"
+            android:scrollbars="vertical" />
+
+        <TextView
+            android:id="@+id/pageIndicator"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|end"
+            android:layout_margin="12dp"
+            android:background="@drawable/page_indicator_bg"
+            android:paddingHorizontal="10dp"
+            android:paddingVertical="4dp"
+            android:textColor="@android:color/white"
+            android:textSize="13sp" />
+
+    </FrameLayout>
+
 </LinearLayout>

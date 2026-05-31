@@ -3,8 +3,10 @@ package com.acidtv.unsyncthing
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.graphics.pdf.PdfRenderer
 import android.media.ExifInterface
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -12,12 +14,15 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.acidtv.unsyncthing.databinding.FragmentPreviewBinding
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 import kotlin.math.max
 
 // Full-screen preview of a single file. The file has already been fetched into
@@ -29,6 +34,10 @@ class PreviewFragment : Fragment() {
     private val vm: SyncthingViewModel by activityViewModels()
     private var _binding: FragmentPreviewBinding? = null
     private val binding get() = _binding!!
+
+    // PDF rendering owns native resources released in onDestroyView.
+    private var pdfRenderer: PdfRenderer? = null
+    private var pdfFd: ParcelFileDescriptor? = null
 
     private val name get() = requireArguments().getString(ARG_NAME, "")
     private val cachedPath get() = requireArguments().getString(ARG_FILE, "")
@@ -96,7 +105,56 @@ class PreviewFragment : Fragment() {
                     }
                 }
             }
+            PreviewType.PDF -> renderPdf()
         }
+    }
+
+    // Open the cached PDF and feed its pages to a recycling adapter. Each page is
+    // rendered to a bitmap on demand off the main thread (see PdfPageAdapter). No
+    // size cap applies — the RecyclerView only holds the visible pages in memory.
+    private fun renderPdf() {
+        binding.pdfContainer.visibility = View.VISIBLE
+        binding.pdfView.layoutManager = LinearLayoutManager(requireContext())
+        try {
+            val fd = ParcelFileDescriptor.open(File(cachedPath), ParcelFileDescriptor.MODE_READ_ONLY)
+            val renderer = PdfRenderer(fd)
+            pdfFd = fd
+            pdfRenderer = renderer
+            binding.pdfView.adapter = PdfPageAdapter(
+                renderer = renderer,
+                scope = viewLifecycleOwner.lifecycleScope,
+                targetWidthProvider = {
+                    binding.pdfView.width - binding.pdfView.paddingStart - binding.pdfView.paddingEnd
+                },
+            )
+            // Live "page / total" readout that tracks scrolling. Posted once the
+            // first layout pass has placed the pages.
+            binding.pdfView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) = updatePageIndicator()
+            })
+            binding.pdfView.post { updatePageIndicator() }
+        } catch (e: IOException) {
+            Snackbar.make(binding.root, "Could not open PDF", Snackbar.LENGTH_LONG).show()
+        }
+    }
+
+    // Show the page nearest the vertical centre of the viewport, 1-based, over
+    // the total page count. Based on the list's own (unzoomed) scroll position.
+    private fun updatePageIndicator() {
+        val binding = _binding ?: return
+        val total = pdfRenderer?.pageCount ?: return
+        val rv = binding.pdfView
+        val centerY = rv.height / 2
+        var page = (rv.layoutManager as? LinearLayoutManager)?.findFirstVisibleItemPosition() ?: 0
+        for (i in 0 until rv.childCount) {
+            val child = rv.getChildAt(i)
+            if (child.top <= centerY && child.bottom >= centerY) {
+                val pos = rv.getChildAdapterPosition(child)
+                if (pos != RecyclerView.NO_POSITION) page = pos
+                break
+            }
+        }
+        binding.pageIndicator.text = "${page.coerceAtLeast(0) + 1} / $total"
     }
 
     private fun readText(file: File): String =
@@ -149,6 +207,14 @@ class PreviewFragment : Fragment() {
     override fun onDestroyView() {
         super.onDestroyView()
         (activity as? AppCompatActivity)?.supportActionBar?.show()
+        // Release native PDF resources: stop binds, then close renderer, then fd.
+        // In-flight render coroutines die with the view scope; PdfPageAdapter's
+        // lock + try/catch absorb any close race.
+        binding.pdfView.adapter = null
+        pdfRenderer?.close()
+        pdfRenderer = null
+        pdfFd?.close()
+        pdfFd = null
         _binding = null
     }
 

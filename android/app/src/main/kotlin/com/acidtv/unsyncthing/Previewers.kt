@@ -1,9 +1,9 @@
 package com.acidtv.unsyncthing
 
 // Supported in-app preview kinds. Each kind gets an entry here, an extension
-// set in [Previewers], and a render branch in PreviewFragment. Future kinds
-// (PDFs, …) follow the same pattern.
-enum class PreviewType { TEXT, IMAGE }
+// set in [Previewers], and a render branch in PreviewFragment. New kinds follow
+// the same pattern.
+enum class PreviewType { TEXT, IMAGE, PDF }
 
 // Largest file we'll fetch for preview. The Go layer has no byte-range fetch,
 // so the whole file is downloaded — cap it so previews stay cheap. Bigger files
@@ -44,6 +44,9 @@ object Previewers {
         "jpg", "jpeg", "png", "gif", "webp", "bmp", "heic", "heif",
     )
 
+    // Documents rendered page-by-page via android.graphics.pdf.PdfRenderer.
+    private val PDF_EXTENSIONS = setOf("pdf")
+
     fun typeFor(entry: FileEntry): PreviewType? = typeFor(entry.name)
 
     fun typeFor(name: String): PreviewType? {
@@ -51,6 +54,7 @@ object Previewers {
         val ext = basename.substringAfterLast('.', "").lowercase()
         if (ext in TEXT_EXTENSIONS) return PreviewType.TEXT
         if (ext in IMAGE_EXTENSIONS) return PreviewType.IMAGE
+        if (ext in PDF_EXTENSIONS) return PreviewType.PDF
         if (basename.lowercase() in TEXT_FILENAMES) return PreviewType.TEXT
         return null
     }
