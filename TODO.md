@@ -38,3 +38,9 @@
    - [ ] Decode is bounded with `inSampleSize` against `maxDim` (4096 px longest edge) to avoid OOM; very large images are downsampled, so zooming in past that size shows downsampled pixels rather than full detail. A tiled `BitmapRegionDecoder` approach would allow full-resolution zoom.
    - [ ] GIFs render their first frame only — `BitmapFactory` doesn't animate, and the builtin-only constraint precludes an animated decoder.
    - [ ] `ZoomableImageView` double-tap snaps (no zoom animation) and there's no fling/momentum panning; both are cosmetic.
+ - [ ] PDF preview (`PreviewType.PDF`, `PdfPageAdapter` + `ZoomableRecyclerView`) — limitations of the initial implementation:
+   - [ ] Skips the 5 MB cap (as requested) but the Go layer still has no byte-range fetch, so the whole PDF downloads over BEP before any page shows — large documents cost bandwidth and preview-cache space.
+   - [ ] Pages render with the platform `android.graphics.pdf.PdfRenderer` (builtin-only); it draws vector content but doesn't expose selectable text, a text layer, links, or form fields.
+   - [ ] Each page bitmap is rendered at `OVERSAMPLE` (2×) view width for crisp zoom; very tall/large pages can use significant memory, and zooming past 2× upscales (soft). A tiled re-render at the current zoom would give full detail with less memory.
+   - [ ] `ZoomableRecyclerView` pan while zoomed is bounded to the current viewport — you can't scroll through the document while zoomed in; zoom back to 1× to scroll between pages. No fling/momentum or zoom animation.
+   - [ ] Build/tests not run in the remote container (no Android SDK/AAR); only the `Previewers` classifier is JVM-unit-tested. Build & smoke-test rendering/zoom locally before shipping.
