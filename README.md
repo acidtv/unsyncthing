@@ -2,6 +2,9 @@
 
 An Android client that browses and opens individual files from a Syncthing peer on demand — like Dropbox — without syncing entire folders.
 
+> [!WARNING]
+> This is competely vibe-coded. I did not read the sourcecode. Use at your own risk!
+
 The project has two layers:
 
 - **`stclient/`** — a Go module wrapping `syncthing/lib/protocol` (the BEP wire protocol). Built into an Android AAR via [gomobile](https://pkg.go.dev/golang.org/x/mobile/cmd/gomobile).
