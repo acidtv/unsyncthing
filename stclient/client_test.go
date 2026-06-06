@@ -2,6 +2,8 @@ package stclient
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/syncthing/syncthing/lib/protocol"
@@ -168,6 +170,39 @@ func TestFolderDevices_ExcludesSelf(t *testing.T) {
 		if id == c.myID.String() {
 			t.Error("FolderDevices() did not exclude our own device ID")
 		}
+	}
+}
+
+// --- WaitForIndex error reporting ---
+
+func TestWaitForIndex_NotConnectedNoReason(t *testing.T) {
+	c := testClient(t)
+	err := c.WaitForIndex("f", 1)
+	if err == nil || err.Error() != "not connected" {
+		t.Errorf("WaitForIndex with no model/no close reason = %v, want \"not connected\"", err)
+	}
+}
+
+func TestWaitForIndex_SurfacesCloseReason(t *testing.T) {
+	c := testClient(t)
+	// Simulate a peer that accepted the TLS handshake then dropped the BEP
+	// session: model cleared, close reason recorded (as the onClosed callback
+	// would do).
+	c.mu.Lock()
+	c.model = nil
+	c.lastCloseErr = fmt.Errorf("device not in cluster config")
+	c.mu.Unlock()
+
+	err := c.WaitForIndex("myfolder", 1)
+	if err == nil {
+		t.Fatal("WaitForIndex should error when the peer dropped the session")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "device not in cluster config") {
+		t.Errorf("error should surface the peer's close reason, got: %q", msg)
+	}
+	if !strings.Contains(msg, "myfolder") {
+		t.Errorf("error should name the folder, got: %q", msg)
 	}
 }
 

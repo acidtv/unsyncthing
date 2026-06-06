@@ -46,6 +46,12 @@ type Client struct {
 	// candidate peers it may differ from the one a bookmark was created with
 	// (failover); the Android layer surfaces it so a downed primary is visible.
 	connectedPeerID protocol.DeviceID
+	// lastCloseErr records why the BEP session most recently dropped (the reason
+	// the protocol package passes to Closed). Surfaced by WaitForIndex so a peer
+	// that hangs up right after connect — typically because it hasn't accepted
+	// this device or shared the folder — produces an actionable error instead of
+	// a bare "not connected". Reset at the start of each Connect.
+	lastCloseErr error
 
 	// connectCancel aborts whichever step of the connect sequence is in
 	// flight — the Connect dial loop or the subsequent WaitForIndex — so a
@@ -145,6 +151,9 @@ func (c *Client) Connect(peerDeviceIDsStr, folderIDs string, status ConnectStatu
 		c.model = nil
 		c.connectedPeerID = protocol.DeviceID{}
 	}
+	// Clear any stale close reason from a previous attempt so WaitForIndex can't
+	// report an old failure against this fresh connect.
+	c.lastCloseErr = nil
 	c.mu.Unlock()
 
 	tlsConf := &tls.Config{
@@ -215,7 +224,7 @@ func (c *Client) Connect(peerDeviceIDsStr, folderIDs string, status ConnectStatu
 	// instead of trying to use a dead conn and surfacing "connection closed".
 	// Done from a goroutine so we never deadlock if Closed fires while Close()
 	// is being driven from a code path that already holds c.mu.
-	model.setOnClosed(func(_ error) {
+	model.setOnClosed(func(err error) {
 		go func() {
 			c.mu.Lock()
 			defer c.mu.Unlock()
@@ -223,6 +232,8 @@ func (c *Client) Connect(peerDeviceIDsStr, folderIDs string, status ConnectStatu
 				c.conn = nil
 				c.model = nil
 				c.connectedPeerID = protocol.DeviceID{}
+				// Remember why the peer hung up so WaitForIndex can explain it.
+				c.lastCloseErr = err
 			}
 		}()
 	})
@@ -258,8 +269,22 @@ func (c *Client) Connect(peerDeviceIDsStr, folderIDs string, status ConnectStatu
 // Returns successfully with whatever partial index has arrived if the timeout
 // is reached but at least some data was received.
 func (c *Client) WaitForIndex(folderID string, timeoutSecs int) error {
-	_, model := c.snapshot()
+	c.mu.Lock()
+	model := c.model
+	closeErr := c.lastCloseErr
+	c.mu.Unlock()
 	if model == nil {
+		// A nil model right after a successful Connect means the peer accepted
+		// the TLS handshake but then dropped the BEP session. For this app that
+		// almost always means the remote hasn't added/accepted this device or
+		// hasn't shared the folder with it — surface the peer's close reason so
+		// the user can act on it instead of seeing a bare "not connected".
+		if closeErr != nil {
+			return fmt.Errorf("peer closed the connection before sending folder %q (%v) — "+
+				"check that (1) this device is added and accepted in the peer's Syncthing, "+
+				"(2) the folder is shared with this device, and (3) the folder ID matches exactly",
+				folderID, closeErr)
+		}
 		return fmt.Errorf("not connected")
 	}
 	// Register under the same cancel slot as Connect so CancelConnect aborts a
