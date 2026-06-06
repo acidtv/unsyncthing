@@ -231,17 +231,20 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // Merge the device IDs discovered from the peer into the matching bookmark's
-    // known-peers list. Runs off the main thread (during connect), so it persists
-    // and posts rather than setting the LiveData directly. No-op when no bookmark
+    // known-peers list. Called from the connect coroutine (IO thread) but hops to
+    // the main thread so the read-modify-write of _bookmarks shares the same
+    // thread as saveBookmark/deleteBookmark — otherwise a concurrent edit could be
+    // lost and LiveData.value would be read off-thread. No-op when no bookmark
     // matches (an unsaved manual connection) or nothing changed.
     private fun updateKnownPeers(primaryPeerID: String, folderID: String, discovered: List<String>) {
-        val current = _bookmarks.value ?: emptyList()
-        val existing = current.firstOrNull { it.peerID == primaryPeerID && it.folderID == folderID } ?: return
-        val merged = mergeKnownPeers(discovered, primaryPeerID)
-        if (merged == existing.knownPeers) return
-        val updated = upsertBookmark(current, existing.copy(knownPeers = merged))
-        prefs.edit().putString("bookmarks", gson.toJson(updated)).apply()
-        _bookmarks.postValue(updated)
+        viewModelScope.launch(Dispatchers.Main) {
+            val current = _bookmarks.value ?: emptyList()
+            val existing = current.firstOrNull { it.peerID == primaryPeerID && it.folderID == folderID }
+                ?: return@launch
+            val merged = mergeKnownPeers(discovered, primaryPeerID)
+            if (merged == existing.knownPeers) return@launch
+            writeBookmarks(upsertBookmark(current, existing.copy(knownPeers = merged)))
+        }
     }
 
     private fun loadBookmarks(): List<Bookmark> {

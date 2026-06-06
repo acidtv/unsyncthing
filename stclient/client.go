@@ -234,17 +234,22 @@ func (c *Client) Connect(peerDeviceIDsStr, folderIDs string, status ConnectStatu
 		protocol.CompressionMetadata,
 		nil, nil,
 	)
-	conn.Start()
-	// Advertise our cluster config so the peer sends its Index.
-	// Folder.Devices MUST include both our ID and the peer's ID,
-	// otherwise the peer rejects with errMissingLocalInClusterConfig.
-	conn.ClusterConfig(buildClusterConfig(c.myID, peerID, folders))
-
+	// Install the connection BEFORE Start(). The protocol package only calls
+	// Closed() after Start, so by publishing c.conn/c.model first we guarantee
+	// the setOnClosed callback observes the assignment: if the peer drops during
+	// the handshake/ClusterConfig window it sees c.model == model and clears it,
+	// rather than no-opping and leaving a dead connection marked live.
 	c.mu.Lock()
 	c.conn = conn
 	c.model = model
 	c.connectedPeerID = peerID
 	c.mu.Unlock()
+
+	conn.Start()
+	// Advertise our cluster config so the peer sends its Index.
+	// Folder.Devices MUST include both our ID and the peer's ID,
+	// otherwise the peer rejects with errMissingLocalInClusterConfig.
+	conn.ClusterConfig(buildClusterConfig(c.myID, peerID, folders))
 	return nil
 }
 
