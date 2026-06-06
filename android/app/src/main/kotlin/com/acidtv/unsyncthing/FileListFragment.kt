@@ -76,7 +76,11 @@ class FileListFragment : Fragment() {
 
         vm.state.observe(viewLifecycleOwner) { state ->
             if (state is UiState.FileList) {
-                binding.tvFolderHeader.text = state.bookmarkName ?: state.folderID
+                val name = state.bookmarkName ?: state.folderID
+                // Show the reached host next to the folder/bookmark name so a
+                // failover to another device serving this folder is visible.
+                val host = state.connectedPeerID?.take(7)?.let { "  ·  $it" } ?: ""
+                binding.tvFolderHeader.text = name + host
                 binding.tvStatus.text = statusText(state)
                 adapter.submitList(state.entries)
             }

@@ -2,6 +2,8 @@ package stclient
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/syncthing/syncthing/lib/protocol"
@@ -100,6 +102,125 @@ func TestBuildClusterConfig_Empty(t *testing.T) {
 	cc := buildClusterConfig(protocol.LocalDeviceID, protocol.GlobalDeviceID, nil)
 	if len(cc.Folders) != 0 {
 		t.Errorf("got %d folders, want 0", len(cc.Folders))
+	}
+}
+
+// --- ConnectedPeerID / FolderDevices ---
+
+func TestConnectedPeerID_EmptyInitially(t *testing.T) {
+	c := testClient(t)
+	if got := c.ConnectedPeerID(); got != "" {
+		t.Errorf("ConnectedPeerID() = %q before Connect, want empty", got)
+	}
+}
+
+func TestFolderDevices_NotConnected(t *testing.T) {
+	c := testClient(t)
+	if _, err := c.FolderDevices("f"); err == nil {
+		t.Error("FolderDevices() should error when not connected")
+	}
+}
+
+func TestFolderDevices_UnknownFolder(t *testing.T) {
+	c := testClient(t)
+	m := newPeerModel()
+	c.mu.Lock()
+	c.model = m
+	c.mu.Unlock()
+
+	data, err := c.FolderDevices("nonexistent")
+	if err != nil {
+		t.Fatalf("FolderDevices() error: %v", err)
+	}
+	if string(data) != "[]" {
+		t.Errorf("unknown folder should return %q, got %q", "[]", string(data))
+	}
+}
+
+func TestFolderDevices_ExcludesSelf(t *testing.T) {
+	c := testClient(t)
+	m := newPeerModel()
+	// Include our own ID plus two others; FolderDevices must drop ours only.
+	m.ClusterConfig(nil, &protocol.ClusterConfig{
+		Folders: []protocol.Folder{{
+			ID: "f",
+			Devices: []protocol.Device{
+				{ID: c.myID},
+				{ID: protocol.LocalDeviceID},
+				{ID: protocol.GlobalDeviceID},
+			},
+		}},
+	})
+	c.mu.Lock()
+	c.model = m
+	c.mu.Unlock()
+
+	data, err := c.FolderDevices("f")
+	if err != nil {
+		t.Fatalf("FolderDevices() error: %v", err)
+	}
+	var ids []string
+	if err := json.Unmarshal(data, &ids); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("got %d devices, want 2 (self excluded): %v", len(ids), ids)
+	}
+	for _, id := range ids {
+		if id == c.myID.String() {
+			t.Error("FolderDevices() did not exclude our own device ID")
+		}
+	}
+}
+
+// --- WaitForIndex error reporting ---
+
+func TestWaitForIndex_NotConnectedNoReason(t *testing.T) {
+	c := testClient(t)
+	err := c.WaitForIndex("f", 1)
+	if err == nil || err.Error() != "not connected" {
+		t.Errorf("WaitForIndex with no model/no close reason = %v, want \"not connected\"", err)
+	}
+}
+
+func TestWaitForIndex_SurfacesCloseReason(t *testing.T) {
+	c := testClient(t)
+	// Simulate a peer that accepted the TLS handshake then dropped the BEP
+	// session: model cleared, close reason recorded (as the onClosed callback
+	// would do).
+	c.mu.Lock()
+	c.model = nil
+	c.lastCloseErr = fmt.Errorf("device not in cluster config")
+	c.mu.Unlock()
+
+	err := c.WaitForIndex("myfolder", 1)
+	if err == nil {
+		t.Fatal("WaitForIndex should error when the peer dropped the session")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "device not in cluster config") {
+		t.Errorf("error should surface the peer's close reason, got: %q", msg)
+	}
+	if !strings.Contains(msg, "myfolder") {
+		t.Errorf("error should name the folder, got: %q", msg)
+	}
+}
+
+// --- Connect input validation ---
+
+func TestConnect_RejectsEmptyPeerList(t *testing.T) {
+	c := testClient(t)
+	if err := c.Connect("", "f", nil); err == nil {
+		t.Error("Connect() should error when no peer device ID is given")
+	}
+}
+
+func TestConnect_AllInvalidPeerIDs(t *testing.T) {
+	c := testClient(t)
+	// No network reachable in unit tests; an all-invalid list must still return
+	// an aggregated error rather than panic.
+	if err := c.Connect("not-a-device-id,also-bad", "f", nil); err == nil {
+		t.Error("Connect() should error when every candidate ID is invalid")
 	}
 }
 

@@ -22,7 +22,12 @@ class BookmarkAdapter(
     override fun onBindViewHolder(holder: VH, position: Int) {
         val b = getItem(position)
         holder.binding.tvName.text = b.name
-        holder.binding.tvDetails.text = "${b.folderID}  ·  ${b.peerID.take(7)}"
+        val hosts = when {
+            b.knownPeers.isNotEmpty() -> "  ·  +${b.knownPeers.size} hosts"
+            b.introducer              -> "  ·  introducer"
+            else                      -> ""
+        }
+        holder.binding.tvDetails.text = "${b.folderID}  ·  ${b.peerID.take(7)}$hosts"
         holder.itemView.setOnClickListener { onTap(b) }
         holder.binding.ibMenu.setOnClickListener { v -> onMenuClick(b, v) }
     }

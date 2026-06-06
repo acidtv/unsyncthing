@@ -5,6 +5,7 @@ package stclient
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -17,8 +18,8 @@ import (
 )
 
 const (
-	clientName       = "unsyncthing"
-	clientVersion    = "v0.1.0"
+	clientName    = "unsyncthing"
+	clientVersion = "v0.1.0"
 	// Per-candidate dial budget. Discovery may return multiple peer
 	// addresses (LAN IP + Docker bridge IP + public IP + ...); we try them
 	// in order, so cap each so an unreachable IP doesn't stall for 30s.
@@ -41,6 +42,16 @@ type Client struct {
 	conn        protocol.Connection
 	model       *peerModel
 	fetchCancel context.CancelFunc
+	// connectedPeerID is the device we're actually connected to. With multiple
+	// candidate peers it may differ from the one a bookmark was created with
+	// (failover); the Android layer surfaces it so a downed primary is visible.
+	connectedPeerID protocol.DeviceID
+	// lastCloseErr records why the BEP session most recently dropped (the reason
+	// the protocol package passes to Closed). Surfaced by WaitForIndex so a peer
+	// that hangs up right after connect — typically because it hasn't accepted
+	// this device or shared the folder — produces an actionable error instead of
+	// a bare "not connected". Reset at the start of each Connect.
+	lastCloseErr error
 
 	// connectCancel aborts whichever step of the connect sequence is in
 	// flight — the Connect dial loop or the subsequent WaitForIndex — so a
@@ -110,38 +121,40 @@ type ConnectStatus interface {
 	OnDialing(addr string)
 }
 
-// Connect resolves peerDeviceIDStr via global + LAN discovery, dials the
+// Connect resolves peerDeviceIDsStr via global + LAN discovery, dials the
 // peer, and establishes an authenticated BEP session.
-// Idempotent: any previous connection on this Client is closed first.
-func (c *Client) Connect(peerDeviceIDStr, folderIDs string, status ConnectStatus) error {
-	peerID, err := protocol.DeviceIDFromString(peerDeviceIDStr)
-	if err != nil {
-		return fmt.Errorf("invalid peer device ID: %w", err)
+//
+// peerDeviceIDsStr may be a single device ID or a comma-separated list of
+// candidate device IDs that share the folder. Each is tried in turn (its own
+// discovery + address walk); the first that yields a verified connection wins,
+// so a bookmark survives any one host being offline. ConnectedPeerID reports
+// which one answered. Idempotent: any previous connection is closed first.
+func (c *Client) Connect(peerDeviceIDsStr, folderIDs string, status ConnectStatus) error {
+	peerIDStrs := splitFolderIDs(peerDeviceIDsStr)
+	if len(peerIDStrs) == 0 {
+		return fmt.Errorf("no peer device ID provided")
 	}
 
 	// Cancellation context for the whole dial sequence (discovery + the
 	// per-candidate dial loop) so CancelConnect can abort it promptly instead
-	// of letting it walk through every remaining address.
+	// of letting it walk through every remaining candidate.
 	ctx, deregister := c.beginCancellable()
 	defer deregister()
 
-	addrs, err := Discover(c.myID.String(), peerDeviceIDStr, 8)
-	if err != nil {
-		return fmt.Errorf("discover peer: %w", err)
-	}
-	if ctx.Err() != nil {
-		return fmt.Errorf("connect cancelled")
-	}
-
+	// Close any prior connection up front, in a short critical section, so we
+	// never hold c.mu across the slow discovery/dial work below (that would
+	// block IsConnected/snapshot/Close for the duration).
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Close any prior connection before opening a new one.
 	if c.conn != nil {
 		c.conn.Close(errClientClose)
 		c.conn = nil
 		c.model = nil
+		c.connectedPeerID = protocol.DeviceID{}
 	}
+	// Clear any stale close reason from a previous attempt so WaitForIndex can't
+	// report an old failure against this fresh connect.
+	c.lastCloseErr = nil
+	c.mu.Unlock()
 
 	tlsConf := &tls.Config{
 		Certificates:       []tls.Certificate{c.cert},
@@ -150,38 +163,41 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string, status ConnectStatus
 		MinVersion:         tls.VersionTLS12,
 	}
 
-	// Walk the candidate addresses in order. Discovery hands them to us in
-	// scheme priority (TCP before relay) and source ordering. Dial or
-	// handshake failures move on to the next candidate; only a device-ID
-	// mismatch is fatal — that means we reached *something* and it produced
-	// the wrong identity, which retrying won't fix.
+	// Try each candidate device in turn: discover its addresses, then walk
+	// them. The first verified handshake wins. Per-peer failures (bad ID,
+	// discovery miss, every address unreachable, identity mismatch) are
+	// recorded and we move on — only success or cancellation ends the loop.
 	var tlsConn *tls.Conn
-	var transport string
-	var dialErrs []string
-	var addr string
-	for _, candidate := range addrs {
-		// Bail before announcing the next candidate so a cancel mid-loop stops
-		// the "Connecting to <addr>…" updates rather than walking the rest.
+	var transport, addr string
+	var peerID protocol.DeviceID
+	var peerErrs []string
+	for _, idStr := range peerIDStrs {
 		if ctx.Err() != nil {
 			return fmt.Errorf("connect cancelled")
 		}
-		if status != nil {
-			status.OnDialing(displayAddr(candidate))
-		}
-		tc, scheme, derr := dialAndHandshake(ctx, candidate, peerID, c.cert, tlsConf)
-		if derr != nil {
-			dialErrs = append(dialErrs, fmt.Sprintf("%s: %v", candidate, derr))
+		candidatePeer, err := protocol.DeviceIDFromString(idStr)
+		if err != nil {
+			peerErrs = append(peerErrs, fmt.Sprintf("%s: invalid device ID: %v", idStr, err))
 			continue
 		}
-		if verr := verifyPeerDeviceID(tc, peerID); verr != nil {
-			tc.Close()
-			return verr
+		addrs, derr := Discover(c.myID.String(), candidatePeer.String(), 8)
+		if derr != nil {
+			peerErrs = append(peerErrs, fmt.Sprintf("%s: discover: %v", candidatePeer.Short(), derr))
+			continue
 		}
-		tlsConn, transport, addr = tc, scheme, candidate
+		tc, scheme, a, walkErr := dialPeer(ctx, addrs, candidatePeer, c.cert, tlsConf, status)
+		if walkErr != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("connect cancelled")
+			}
+			peerErrs = append(peerErrs, fmt.Sprintf("%s: %v", candidatePeer.Short(), walkErr))
+			continue
+		}
+		tlsConn, transport, addr, peerID = tc, scheme, a, candidatePeer
 		break
 	}
 	if tlsConn == nil {
-		return fmt.Errorf("dial: tried %d address(es): %s", len(addrs), strings.Join(dialErrs, "; "))
+		return fmt.Errorf("could not reach any peer: tried %d, %s", len(peerIDStrs), strings.Join(peerErrs, "; "))
 	}
 
 	// BEP Hello exchange — protocol.NewConnection does NOT do this.
@@ -208,13 +224,16 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string, status ConnectStatus
 	// instead of trying to use a dead conn and surfacing "connection closed".
 	// Done from a goroutine so we never deadlock if Closed fires while Close()
 	// is being driven from a code path that already holds c.mu.
-	model.setOnClosed(func(_ error) {
+	model.setOnClosed(func(err error) {
 		go func() {
 			c.mu.Lock()
 			defer c.mu.Unlock()
 			if c.model == model {
 				c.conn = nil
 				c.model = nil
+				c.connectedPeerID = protocol.DeviceID{}
+				// Remember why the peer hung up so WaitForIndex can explain it.
+				c.lastCloseErr = err
 			}
 		}()
 	})
@@ -226,14 +245,22 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string, status ConnectStatus
 		protocol.CompressionMetadata,
 		nil, nil,
 	)
+	// Install the connection BEFORE Start(). The protocol package only calls
+	// Closed() after Start, so by publishing c.conn/c.model first we guarantee
+	// the setOnClosed callback observes the assignment: if the peer drops during
+	// the handshake/ClusterConfig window it sees c.model == model and clears it,
+	// rather than no-opping and leaving a dead connection marked live.
+	c.mu.Lock()
+	c.conn = conn
+	c.model = model
+	c.connectedPeerID = peerID
+	c.mu.Unlock()
+
 	conn.Start()
 	// Advertise our cluster config so the peer sends its Index.
 	// Folder.Devices MUST include both our ID and the peer's ID,
 	// otherwise the peer rejects with errMissingLocalInClusterConfig.
 	conn.ClusterConfig(buildClusterConfig(c.myID, peerID, folders))
-
-	c.conn = conn
-	c.model = model
 	return nil
 }
 
@@ -242,8 +269,22 @@ func (c *Client) Connect(peerDeviceIDStr, folderIDs string, status ConnectStatus
 // Returns successfully with whatever partial index has arrived if the timeout
 // is reached but at least some data was received.
 func (c *Client) WaitForIndex(folderID string, timeoutSecs int) error {
-	_, model := c.snapshot()
+	c.mu.Lock()
+	model := c.model
+	closeErr := c.lastCloseErr
+	c.mu.Unlock()
 	if model == nil {
+		// A nil model right after a successful Connect means the peer accepted
+		// the TLS handshake but then dropped the BEP session. For this app that
+		// almost always means the remote hasn't added/accepted this device or
+		// hasn't shared the folder with it — surface the peer's close reason so
+		// the user can act on it instead of seeing a bare "not connected".
+		if closeErr != nil {
+			return fmt.Errorf("peer closed the connection before sending folder %q (%v) — "+
+				"check that (1) this device is added and accepted in the peer's Syncthing, "+
+				"(2) the folder is shared with this device, and (3) the folder ID matches exactly",
+				folderID, closeErr)
+		}
 		return fmt.Errorf("not connected")
 	}
 	// Register under the same cancel slot as Connect so CancelConnect aborts a
@@ -270,7 +311,41 @@ func (c *Client) Close() {
 		c.conn.Close(errClientClose)
 		c.conn = nil
 		c.model = nil
+		c.connectedPeerID = protocol.DeviceID{}
 	}
+}
+
+// ConnectedPeerID returns the device ID we're currently connected to, or ""
+// when not connected. With a multi-candidate Connect this is the host that
+// actually answered, which may differ from a bookmark's primary peer.
+func (c *Client) ConnectedPeerID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.connectedPeerID == (protocol.DeviceID{}) {
+		return ""
+	}
+	return c.connectedPeerID.String()
+}
+
+// FolderDevices returns, as a JSON array of device-ID strings, the other
+// devices the peer advertised as sharing folderID (from its ClusterConfig),
+// excluding our own device. The caller stores these on a bookmark so it can
+// fail over to another host when the primary is down. Returns "[]" for a
+// folder we have no cluster config for; errors only when not connected.
+func (c *Client) FolderDevices(folderID string) ([]byte, error) {
+	_, model := c.snapshot()
+	if model == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+	devs := model.devicesForFolder(folderID)
+	out := make([]string, 0, len(devs))
+	for _, d := range devs {
+		if d == c.myID {
+			continue // exclude ourselves; keep the connected peer and others
+		}
+		out = append(out, d.String())
+	}
+	return json.Marshal(out)
 }
 
 // CancelFetch aborts the in-progress FetchFile, if any. No-op when idle.
@@ -361,6 +436,39 @@ func (i *tlsConnInfo) String() string           { return i.addr }
 func (i *tlsConnInfo) Crypto() string           { return "tls" }
 func (i *tlsConnInfo) EstablishedAt() time.Time { return i.establishedAt }
 func (i *tlsConnInfo) ConnectionID() string     { return i.addr }
+
+// dialPeer walks the discovered addresses for one peer in order and returns
+// the first that completes the TLS handshake AND presents the expected device
+// ID. Dial/handshake failures and identity mismatches are per-address failures:
+// they're recorded and skipped, so an overlapping or stale address belonging to
+// a different device doesn't abort failover to the next candidate. Only running
+// out of addresses (returns an aggregated error) or ctx cancellation ends the
+// walk. Returns the post-handshake conn, its transport, and the address used.
+func dialPeer(ctx context.Context, addrs []string, peerID protocol.DeviceID, cert tls.Certificate, tlsCfg *tls.Config, status ConnectStatus) (*tls.Conn, string, string, error) {
+	var dialErrs []string
+	for _, candidate := range addrs {
+		// Bail before announcing the next candidate so a cancel mid-loop stops
+		// the "Connecting to <addr>…" updates rather than walking the rest.
+		if ctx.Err() != nil {
+			return nil, "", "", fmt.Errorf("connect cancelled")
+		}
+		if status != nil {
+			status.OnDialing(displayAddr(candidate))
+		}
+		tc, scheme, derr := dialAndHandshake(ctx, candidate, peerID, cert, tlsCfg)
+		if derr != nil {
+			dialErrs = append(dialErrs, fmt.Sprintf("%s: %v", candidate, derr))
+			continue
+		}
+		if verr := verifyPeerDeviceID(tc, peerID); verr != nil {
+			tc.Close()
+			dialErrs = append(dialErrs, fmt.Sprintf("%s: %v", candidate, verr))
+			continue
+		}
+		return tc, scheme, candidate, nil
+	}
+	return nil, "", "", fmt.Errorf("tried %d address(es): %s", len(addrs), strings.Join(dialErrs, "; "))
+}
 
 // dialAndHandshake dials the given candidate URL according to its scheme,
 // then performs the BEP TLS handshake. Returns the post-handshake *tls.Conn

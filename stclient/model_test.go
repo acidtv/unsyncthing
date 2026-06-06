@@ -33,6 +33,75 @@ func TestNewPeerModel(t *testing.T) {
 	if m.lastUpdate == nil {
 		t.Error("lastUpdate map is nil")
 	}
+	if m.folderDevices == nil {
+		t.Error("folderDevices map is nil")
+	}
+}
+
+func TestPeerModel_ClusterConfig_StoresDevices(t *testing.T) {
+	m := newPeerModel()
+	err := m.ClusterConfig(nil, &protocol.ClusterConfig{
+		Folders: []protocol.Folder{{
+			ID: "f",
+			Devices: []protocol.Device{
+				{ID: protocol.LocalDeviceID},
+				{ID: protocol.GlobalDeviceID},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ClusterConfig() error: %v", err)
+	}
+	devs := m.devicesForFolder("f")
+	if len(devs) != 2 {
+		t.Fatalf("got %d devices, want 2", len(devs))
+	}
+	seen := map[protocol.DeviceID]bool{devs[0]: true, devs[1]: true}
+	if !seen[protocol.LocalDeviceID] || !seen[protocol.GlobalDeviceID] {
+		t.Errorf("devicesForFolder missing expected IDs: %v", devs)
+	}
+}
+
+func TestPeerModel_ClusterConfig_Replaces(t *testing.T) {
+	m := newPeerModel()
+	m.ClusterConfig(nil, &protocol.ClusterConfig{
+		Folders: []protocol.Folder{{ID: "f", Devices: []protocol.Device{
+			{ID: protocol.LocalDeviceID}, {ID: protocol.GlobalDeviceID},
+		}}},
+	})
+	m.ClusterConfig(nil, &protocol.ClusterConfig{
+		Folders: []protocol.Folder{{ID: "f", Devices: []protocol.Device{
+			{ID: protocol.GlobalDeviceID},
+		}}},
+	})
+	devs := m.devicesForFolder("f")
+	if len(devs) != 1 {
+		t.Fatalf("second ClusterConfig should replace; got %d devices, want 1", len(devs))
+	}
+	if devs[0] != protocol.GlobalDeviceID {
+		t.Errorf("device = %v, want GlobalDeviceID", devs[0])
+	}
+}
+
+func TestPeerModel_DevicesForFolder_Unknown(t *testing.T) {
+	m := newPeerModel()
+	if m.devicesForFolder("nope") != nil {
+		t.Error("devicesForFolder() for unknown folder should return nil")
+	}
+}
+
+func TestPeerModel_DevicesForFolder_DefensiveCopy(t *testing.T) {
+	m := newPeerModel()
+	m.ClusterConfig(nil, &protocol.ClusterConfig{
+		Folders: []protocol.Folder{{ID: "f", Devices: []protocol.Device{{ID: protocol.LocalDeviceID}}}},
+	})
+	copy1 := m.devicesForFolder("f")
+	copy1[0] = protocol.GlobalDeviceID
+
+	copy2 := m.devicesForFolder("f")
+	if copy2[0] == protocol.GlobalDeviceID {
+		t.Error("devicesForFolder() returned a slice alias instead of a defensive copy")
+	}
 }
 
 func TestPeerModel_Index_StoresFiles(t *testing.T) {
@@ -223,7 +292,7 @@ func TestPeerModel_ConcurrentReadWrite(t *testing.T) {
 	m := newPeerModel()
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
-		wg.Add(2)
+		wg.Add(4)
 		go func() {
 			defer wg.Done()
 			m.Index(nil, &protocol.Index{Folder: "f", Files: []protocol.FileInfo{makeFile("a.txt", 1)}})
@@ -231,6 +300,16 @@ func TestPeerModel_ConcurrentReadWrite(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			m.files("f")
+		}()
+		go func() {
+			defer wg.Done()
+			m.ClusterConfig(nil, &protocol.ClusterConfig{
+				Folders: []protocol.Folder{{ID: "f", Devices: []protocol.Device{{ID: protocol.LocalDeviceID}}}},
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			m.devicesForFolder("f")
 		}()
 	}
 	wg.Wait()
