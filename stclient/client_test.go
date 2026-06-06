@@ -210,7 +210,7 @@ func TestWaitForIndex_SurfacesCloseReason(t *testing.T) {
 
 func TestConnect_RejectsEmptyPeerList(t *testing.T) {
 	c := testClient(t)
-	if err := c.Connect("", "f", nil); err == nil {
+	if err := c.Connect("", "f", "", nil); err == nil {
 		t.Error("Connect() should error when no peer device ID is given")
 	}
 }
@@ -219,7 +219,7 @@ func TestConnect_AllInvalidPeerIDs(t *testing.T) {
 	c := testClient(t)
 	// No network reachable in unit tests; an all-invalid list must still return
 	// an aggregated error rather than panic.
-	if err := c.Connect("not-a-device-id,also-bad", "f", nil); err == nil {
+	if err := c.Connect("not-a-device-id,also-bad", "f", "", nil); err == nil {
 		t.Error("Connect() should error when every candidate ID is invalid")
 	}
 }

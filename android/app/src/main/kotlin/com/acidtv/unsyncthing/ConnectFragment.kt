@@ -34,7 +34,7 @@ class ConnectFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         adapter = BookmarkAdapter(
-            onTap = { bookmark -> vm.connect(bookmark.peerID, bookmark.folderID, bookmark.knownPeers, bookmark.introducer) },
+            onTap = { bookmark -> vm.connect(bookmark.peerID, bookmark.folderID, bookmark.knownPeers, bookmark.introducer, bookmark.cachedAddrs) },
             onMenuClick = { bookmark, anchor -> showBookmarkMenu(bookmark, anchor) },
         )
 
@@ -82,7 +82,7 @@ class ConnectFragment : Fragment() {
         popup.menuInflater.inflate(R.menu.menu_bookmark, popup.menu)
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
-                R.id.action_connect -> { vm.connect(bookmark.peerID, bookmark.folderID, bookmark.knownPeers, bookmark.introducer); true }
+                R.id.action_connect -> { vm.connect(bookmark.peerID, bookmark.folderID, bookmark.knownPeers, bookmark.introducer, bookmark.cachedAddrs); true }
                 R.id.action_hosts   -> { showKnownHosts(bookmark); true }
                 R.id.action_edit    -> { showEditDialog(bookmark); true }
                 R.id.action_delete  -> { confirmDelete(bookmark); true }
