@@ -216,21 +216,37 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         return Pair(peers, folder)
     }
 
-    fun saveBookmark(name: String, peerID: String, folderID: String, introducer: Boolean = false) {
+    // originalName is the bookmark's current name when editing, or null when
+    // creating. Returns DuplicateName if another bookmark already has `name`
+    // — the name is the identity, so duplicates would be ambiguous.
+    fun saveBookmark(
+        name: String,
+        peerID: String,
+        folderID: String,
+        introducer: Boolean = false,
+        originalName: String? = null,
+    ): BookmarkSaveResult {
         val current = _bookmarks.value ?: emptyList()
-        // Preserve any already-discovered fallback hosts across a name edit
-        // (peerID + folderID are the identity, so an edit keeping them is the
-        // same bookmark). Drop them when introducer is turned off so a disabled
-        // bookmark doesn't keep dialling hosts the user no longer trusts.
-        val existing = current.firstOrNull { it.peerID == peerID && it.folderID == folderID }
-        val keptPeers = if (introducer) existing?.knownPeers ?: emptyList() else emptyList()
-        val keptCached = existing?.cachedAddrs ?: emptyList()
-        val updated = upsertBookmark(current, Bookmark(name, peerID, folderID, keptPeers, introducer, keptCached))
+        if (current.any { it.name == name && it.name != originalName }) {
+            return BookmarkSaveResult.DuplicateName
+        }
+        // Preserve already-discovered fallback hosts and cached addresses
+        // across a rename. If the peer changed, the cached addresses belonged
+        // to a different host so drop them; same for known peers when the
+        // user turns off introducer.
+        val existing = originalName?.let { o -> current.firstOrNull { it.name == o } }
+        val peerUnchanged = existing != null && existing.peerID == peerID && existing.folderID == folderID
+        val keptPeers = if (introducer && peerUnchanged) existing!!.knownPeers else emptyList()
+        val keptCached = if (peerUnchanged) existing!!.cachedAddrs else emptyList()
+        val newBookmark = Bookmark(name, peerID, folderID, keptPeers, introducer, keptCached)
+        val updated = if (originalName != null) replaceBookmark(current, originalName, newBookmark)
+                      else current + newBookmark
         writeBookmarks(updated)
+        return BookmarkSaveResult.Success
     }
 
-    fun deleteBookmark(peerID: String, folderID: String) {
-        val updated = removeBookmark(_bookmarks.value ?: emptyList(), peerID, folderID)
+    fun deleteBookmark(name: String) {
+        val updated = removeBookmark(_bookmarks.value ?: emptyList(), name)
         writeBookmarks(updated)
     }
 
@@ -761,8 +777,13 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
 
 }
 
-internal fun removeBookmark(existing: List<Bookmark>, peerID: String, folderID: String): List<Bookmark> =
-    existing.filterNot { it.peerID == peerID && it.folderID == folderID }
+sealed class BookmarkSaveResult {
+    object Success : BookmarkSaveResult()
+    object DuplicateName : BookmarkSaveResult()
+}
+
+internal fun removeBookmark(existing: List<Bookmark>, name: String): List<Bookmark> =
+    existing.filterNot { it.name == name }
 
 internal fun bookmarkNameFor(bookmarks: List<Bookmark>, peerID: String, folderID: String): String? =
     bookmarks.firstOrNull { it.peerID == peerID && it.folderID == folderID }?.name
@@ -773,8 +794,16 @@ internal fun bookmarkNameFor(bookmarks: List<Bookmark>, peerID: String, folderID
 internal fun mergeKnownPeers(discovered: List<String>, primary: String): List<String> =
     discovered.filter { it != primary }.distinct()
 
+// upsertBookmark replaces an existing bookmark with the same name, or appends.
+// Name is the identity — peer/folder are mutable attributes the user can edit.
 internal fun upsertBookmark(existing: List<Bookmark>, new: Bookmark): List<Bookmark> {
-    val idx = existing.indexOfFirst { it.peerID == new.peerID && it.folderID == new.folderID }
+    val idx = existing.indexOfFirst { it.name == new.name }
+    return if (idx >= 0) existing.toMutableList().apply { set(idx, new) }
+           else existing + new
+}
+
+internal fun replaceBookmark(existing: List<Bookmark>, originalName: String, new: Bookmark): List<Bookmark> {
+    val idx = existing.indexOfFirst { it.name == originalName }
     return if (idx >= 0) existing.toMutableList().apply { set(idx, new) }
            else existing + new
 }

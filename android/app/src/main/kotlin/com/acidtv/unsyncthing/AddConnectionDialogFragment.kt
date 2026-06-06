@@ -32,7 +32,11 @@ class AddConnectionDialogFragment : DialogFragment() {
                     return@setOnClickListener
                 }
                 if (name.isNotBlank()) {
-                    vm.saveBookmark(name, peerID, folder, introducer)
+                    val result = vm.saveBookmark(name, peerID, folder, introducer)
+                    if (result is BookmarkSaveResult.DuplicateName) {
+                        Toast.makeText(requireContext(), "A bookmark named \"$name\" already exists", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
                 }
                 vm.connect(peerID, folder, introducer = introducer)
                 dismiss()

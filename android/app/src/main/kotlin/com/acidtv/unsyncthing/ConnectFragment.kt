@@ -142,7 +142,17 @@ class ConnectFragment : Fragment() {
                     Toast.makeText(requireContext(), "Peer ID and folder are required", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
-                vm.saveBookmark(name, peerID, folder, dialogBinding.cbIntroducer.isChecked)
+                val result = vm.saveBookmark(
+                    name,
+                    peerID,
+                    folder,
+                    dialogBinding.cbIntroducer.isChecked,
+                    originalName = bookmark.name,
+                )
+                if (result is BookmarkSaveResult.DuplicateName) {
+                    Toast.makeText(requireContext(), "A bookmark named \"$name\" already exists", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
                 dialog.dismiss()
             }
         }
@@ -153,7 +163,7 @@ class ConnectFragment : Fragment() {
         MaterialAlertDialogBuilder(requireContext())
             .setTitle("Delete bookmark?")
             .setMessage("Remove \"${bookmark.name}\"?")
-            .setPositiveButton("Delete") { _, _ -> vm.deleteBookmark(bookmark.peerID, bookmark.folderID) }
+            .setPositiveButton("Delete") { _, _ -> vm.deleteBookmark(bookmark.name) }
             .setNegativeButton("Cancel", null)
             .show()
     }

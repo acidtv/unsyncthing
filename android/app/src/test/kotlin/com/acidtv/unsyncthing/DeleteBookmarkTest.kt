@@ -11,37 +11,20 @@ class DeleteBookmarkTest {
             Bookmark("Home", "PEER1", "default"),
             Bookmark("Work", "PEER2", "docs"),
         )
-        val result = removeBookmark(existing, "PEER1", "default")
+        val result = removeBookmark(existing, "Home")
         assertEquals(listOf(Bookmark("Work", "PEER2", "docs")), result)
     }
 
     @Test
     fun noOpWhenListIsEmpty() {
-        val result = removeBookmark(emptyList(), "PEER1", "default")
+        val result = removeBookmark(emptyList(), "Home")
         assertEquals(emptyList<Bookmark>(), result)
     }
 
     @Test
-    fun noOpWhenPeerIDDoesNotMatch() {
+    fun noOpWhenNameDoesNotMatch() {
         val existing = listOf(Bookmark("Home", "PEER1", "default"))
-        val result = removeBookmark(existing, "PEER2", "default")
+        val result = removeBookmark(existing, "Work")
         assertEquals(existing, result)
-    }
-
-    @Test
-    fun noOpWhenFolderIDDoesNotMatch() {
-        val existing = listOf(Bookmark("Home", "PEER1", "default"))
-        val result = removeBookmark(existing, "PEER1", "music")
-        assertEquals(existing, result)
-    }
-
-    @Test
-    fun requiresBothPeerAndFolderToMatch() {
-        val existing = listOf(
-            Bookmark("A", "PEER1", "docs"),
-            Bookmark("B", "PEER1", "music"),
-        )
-        val result = removeBookmark(existing, "PEER1", "docs")
-        assertEquals(listOf(Bookmark("B", "PEER1", "music")), result)
     }
 }
