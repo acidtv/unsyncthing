@@ -43,6 +43,9 @@ sealed class UiState {
         val allEntries: List<FileEntry>,
         val currentDir: String = "",
         val bookmarkName: String? = null,
+        // The device we actually connected to. May differ from the bookmark's
+        // primary peer when it was offline and we failed over to another host.
+        val connectedPeerID: String? = null,
     ) : UiState() {
         val entries: List<FileEntry> get() {
             val prefix = if (currentDir.isEmpty()) "" else "$currentDir/"
@@ -88,7 +91,20 @@ data class PreviewReady(
     val file: File,
 )
 
-data class Bookmark(val name: String, val peerID: String, val folderID: String)
+// knownPeers are additional device IDs discovered (from the peer's ClusterConfig)
+// as also sharing folderID. The primary peerID is the identity key and is tried
+// first; knownPeers are fallback hosts so the bookmark survives one host being
+// offline. Discovery only happens when introducer is true — i.e. the user has
+// chosen to trust this peer to tell the app about the folder's other devices.
+// Old stored bookmarks lack these fields — Gson leaves them null/default, so
+// loadBookmarks() normalises them.
+data class Bookmark(
+    val name: String,
+    val peerID: String,
+    val folderID: String,
+    val knownPeers: List<String> = emptyList(),
+    val introducer: Boolean = false,
+)
 
 private data class CertData(
     @SerializedName("CertPEM")  val certPEM: String,
@@ -179,14 +195,28 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // Returns (candidatePeerIDs, folder) for a transparent reconnect. The first
+    // element is the comma-separated candidate list (primary + known fallbacks),
+    // which Client.connect splits and tries in turn — so reconnects fail over to
+    // another host just like a fresh connect. Falls back to the legacy single
+    // peerID key for connections saved before multi-host support.
     fun savedConnection(): Pair<String, String>? {
-        val peerID = prefs.getString("lastPeerID", null) ?: return null
+        val peers = prefs.getString("lastPeerIDs", null)
+            ?: prefs.getString("lastPeerID", null)
+            ?: return null
         val folder = prefs.getString("lastFolder", null) ?: return null
-        return Pair(peerID, folder)
+        return Pair(peers, folder)
     }
 
-    fun saveBookmark(name: String, peerID: String, folderID: String) {
-        val updated = upsertBookmark(_bookmarks.value ?: emptyList(), Bookmark(name, peerID, folderID))
+    fun saveBookmark(name: String, peerID: String, folderID: String, introducer: Boolean = false) {
+        val current = _bookmarks.value ?: emptyList()
+        // Preserve any already-discovered fallback hosts across a name edit
+        // (peerID + folderID are the identity, so an edit keeping them is the
+        // same bookmark). Drop them when introducer is turned off so a disabled
+        // bookmark doesn't keep dialling hosts the user no longer trusts.
+        val existing = current.firstOrNull { it.peerID == peerID && it.folderID == folderID }
+        val keptPeers = if (introducer) existing?.knownPeers ?: emptyList() else emptyList()
+        val updated = upsertBookmark(current, Bookmark(name, peerID, folderID, keptPeers, introducer))
         writeBookmarks(updated)
     }
 
@@ -200,11 +230,28 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         _bookmarks.value = list
     }
 
+    // Merge the device IDs discovered from the peer into the matching bookmark's
+    // known-peers list. Runs off the main thread (during connect), so it persists
+    // and posts rather than setting the LiveData directly. No-op when no bookmark
+    // matches (an unsaved manual connection) or nothing changed.
+    private fun updateKnownPeers(primaryPeerID: String, folderID: String, discovered: List<String>) {
+        val current = _bookmarks.value ?: emptyList()
+        val existing = current.firstOrNull { it.peerID == primaryPeerID && it.folderID == folderID } ?: return
+        val merged = mergeKnownPeers(discovered, primaryPeerID)
+        if (merged == existing.knownPeers) return
+        val updated = upsertBookmark(current, existing.copy(knownPeers = merged))
+        prefs.edit().putString("bookmarks", gson.toJson(updated)).apply()
+        _bookmarks.postValue(updated)
+    }
+
     private fun loadBookmarks(): List<Bookmark> {
         val raw = prefs.getString("bookmarks", null)
         if (raw != null) {
             val type = object : TypeToken<List<Bookmark>>() {}.type
-            return gson.fromJson(raw, type) ?: emptyList()
+            val parsed: List<Bookmark> = gson.fromJson(raw, type) ?: emptyList()
+            // Gson bypasses Kotlin constructor defaults, so bookmarks saved
+            // before knownPeers existed deserialise with a null list. Normalise.
+            return parsed.map { it.copy(knownPeers = it.knownPeers ?: emptyList()) }
         }
         // Migration: seed from the legacy single-connection prefs so users
         // upgrading don't lose their saved peer/folder.
@@ -218,9 +265,23 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         return emptyList()
     }
 
-    fun connect(peerDeviceID: String, folderID: String) {
+    // introducer controls the multi-host behaviour: when true, fallbackPeers are
+    // also tried and the peer's shared-device list is captured to refresh them.
+    // When false the bookmark stays pinned to its single primary peer.
+    fun connect(
+        peerDeviceID: String,
+        folderID: String,
+        fallbackPeers: List<String> = emptyList(),
+        introducer: Boolean = false,
+    ) {
+        // Try the primary first, then (only as an introducer) any known fallback
+        // hosts. Client.connect splits this CSV and walks the candidates until
+        // one answers.
+        val candidates = (listOf(peerDeviceID) + if (introducer) fallbackPeers else emptyList()).distinct()
+        val candidatesCsv = candidates.joinToString(",")
         prefs.edit()
             .putString("lastPeerID", peerDeviceID)
+            .putString("lastPeerIDs", candidatesCsv)
             .putString("lastFolder", folderID)
             .apply()
         // Drop any unconsumed one-shot events from a previous session so the
@@ -248,7 +309,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 // Hold a MulticastLock while we wait for UDP broadcasts —
                 // some Wi-Fi power-save implementations drop them otherwise.
                 withMulticastLock {
-                    newClient.connect(peerDeviceID, folderID, status)
+                    newClient.connect(candidatesCsv, folderID, status)
                 }
                 // Bail before the (separately cancellable) index wait if Cancel
                 // already landed, closing the gap between connect() returning and
@@ -277,8 +338,23 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                     connectingClient = null
                 }
 
+                // As an introducer, the peer's ClusterConfig (guaranteed to have
+                // arrived before the index) names the other devices sharing this
+                // folder. Remember them on the matching bookmark so future
+                // connects can fail over. Skipped when introducer is off.
+                val connectedPeer = newClient.connectedPeerID().ifEmpty { null }
+                if (introducer) {
+                    val discovered = runCatching {
+                        val devJson = String(newClient.folderDevices(folderID))
+                        gson.fromJson<List<String>>(devJson, object : TypeToken<List<String>>() {}.type) ?: emptyList()
+                    }.getOrDefault(emptyList())
+                    if (discovered.isNotEmpty()) {
+                        updateKnownPeers(peerDeviceID, folderID, discovered)
+                    }
+                }
+
                 val bookmarkName = bookmarkNameFor(_bookmarks.value ?: emptyList(), peerDeviceID, folderID)
-                _state.postValue(UiState.FileList(folderID, entries, bookmarkName = bookmarkName))
+                _state.postValue(UiState.FileList(folderID, entries, bookmarkName = bookmarkName, connectedPeerID = connectedPeer))
             } catch (e: CancellationException) {
                 newClient?.close()
                 throw e
@@ -630,6 +706,12 @@ internal fun removeBookmark(existing: List<Bookmark>, peerID: String, folderID: 
 
 internal fun bookmarkNameFor(bookmarks: List<Bookmark>, peerID: String, folderID: String): String? =
     bookmarks.firstOrNull { it.peerID == peerID && it.folderID == folderID }?.name
+
+// mergeKnownPeers turns the device IDs the peer reported for a folder into the
+// fallback set stored on a bookmark: drop the primary (it's the identity key,
+// tried first and stored separately) and de-duplicate.
+internal fun mergeKnownPeers(discovered: List<String>, primary: String): List<String> =
+    discovered.filter { it != primary }.distinct()
 
 internal fun upsertBookmark(existing: List<Bookmark>, new: Bookmark): List<Bookmark> {
     val idx = existing.indexOfFirst { it.peerID == new.peerID && it.folderID == new.folderID }

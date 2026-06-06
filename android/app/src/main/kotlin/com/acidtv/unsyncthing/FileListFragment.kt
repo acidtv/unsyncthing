@@ -197,6 +197,10 @@ class FileListFragment : Fragment() {
 
     private fun statusText(state: UiState.FileList): String {
         val count = "${state.entries.size} items"
-        return if (state.currentDir.isEmpty()) count else "${state.currentDir}  ($count)"
+        val base = if (state.currentDir.isEmpty()) count else "${state.currentDir}  ($count)"
+        // Surface which host actually answered so a failover to another device
+        // serving this folder is visible.
+        val host = state.connectedPeerID?.take(7)?.let { "  ·  host $it" } ?: ""
+        return base + host
     }
 }

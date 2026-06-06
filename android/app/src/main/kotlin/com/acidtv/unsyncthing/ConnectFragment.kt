@@ -34,7 +34,7 @@ class ConnectFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         adapter = BookmarkAdapter(
-            onTap = { bookmark -> vm.connect(bookmark.peerID, bookmark.folderID) },
+            onTap = { bookmark -> vm.connect(bookmark.peerID, bookmark.folderID, bookmark.knownPeers, bookmark.introducer) },
             onMenuClick = { bookmark, anchor -> showBookmarkMenu(bookmark, anchor) },
         )
 
@@ -82,7 +82,8 @@ class ConnectFragment : Fragment() {
         popup.menuInflater.inflate(R.menu.menu_bookmark, popup.menu)
         popup.setOnMenuItemClickListener { item ->
             when (item.itemId) {
-                R.id.action_connect -> { vm.connect(bookmark.peerID, bookmark.folderID); true }
+                R.id.action_connect -> { vm.connect(bookmark.peerID, bookmark.folderID, bookmark.knownPeers, bookmark.introducer); true }
+                R.id.action_hosts   -> { showKnownHosts(bookmark); true }
                 R.id.action_edit    -> { showEditDialog(bookmark); true }
                 R.id.action_delete  -> { confirmDelete(bookmark); true }
                 else                -> false
@@ -91,11 +92,34 @@ class ConnectFragment : Fragment() {
         popup.show()
     }
 
+    // Read-only list of the hosts this bookmark can reach: the primary plus any
+    // devices discovered (from the peer's shared-device list) as also serving the
+    // folder. Discovery is automatic on connect, so there's nothing to edit here.
+    private fun showKnownHosts(bookmark: Bookmark) {
+        val lines = buildList {
+            add("${bookmark.peerID.take(7)}  ·  primary")
+            bookmark.knownPeers.forEach { add(it.take(7)) }
+        }
+        val message = when {
+            !bookmark.introducer ->
+                "${lines.first()}\n\nIntroducer is off, so this bookmark only uses its primary host. Turn it on in Edit to discover and fail over to other devices sharing this folder."
+            bookmark.knownPeers.isEmpty() ->
+                "${lines.first()}\n\nNo additional hosts discovered yet. Connect once and the other devices sharing this folder will be remembered as fallbacks."
+            else -> lines.joinToString("\n")
+        }
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("Known hosts")
+            .setMessage(message)
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
     private fun showEditDialog(bookmark: Bookmark) {
         val dialogBinding = DialogAddConnectionBinding.inflate(layoutInflater)
         dialogBinding.etName.setText(bookmark.name)
         dialogBinding.etPeerID.setText(bookmark.peerID)
         dialogBinding.etFolder.setText(bookmark.folderID)
+        dialogBinding.cbIntroducer.isChecked = bookmark.introducer
         dialogBinding.tvNameHint.visibility = View.GONE
 
         val dialog = MaterialAlertDialogBuilder(requireContext())
@@ -118,7 +142,7 @@ class ConnectFragment : Fragment() {
                     Toast.makeText(requireContext(), "Peer ID and folder are required", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
-                vm.saveBookmark(name, peerID, folder)
+                vm.saveBookmark(name, peerID, folder, dialogBinding.cbIntroducer.isChecked)
                 dialog.dismiss()
             }
         }

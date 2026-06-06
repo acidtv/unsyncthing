@@ -26,14 +26,15 @@ class AddConnectionDialogFragment : DialogFragment() {
                 val name = binding.etName.text.toString().trim()
                 val peerID = binding.etPeerID.text.toString().trim()
                 val folder = binding.etFolder.text.toString().trim()
+                val introducer = binding.cbIntroducer.isChecked
                 if (peerID.isBlank() || folder.isBlank()) {
                     Toast.makeText(requireContext(), "Peer ID and folder are required", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
                 if (name.isNotBlank()) {
-                    vm.saveBookmark(name, peerID, folder)
+                    vm.saveBookmark(name, peerID, folder, introducer)
                 }
-                vm.connect(peerID, folder)
+                vm.connect(peerID, folder, introducer = introducer)
                 dismiss()
             }
         }

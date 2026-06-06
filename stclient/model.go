@@ -15,13 +15,18 @@ type peerModel struct {
 	mu         sync.RWMutex
 	folders    map[string][]protocol.FileInfo
 	lastUpdate map[string]time.Time // when Index/IndexUpdate last touched the folder
-	onClosed   func(error)          // optional callback fired from Closed()
+	// folderDevices records the device IDs the peer advertises as sharing each
+	// folder, captured from its ClusterConfig. Lets the caller discover other
+	// hosts serving a folder so a bookmark can fail over when one is offline.
+	folderDevices map[string][]protocol.DeviceID
+	onClosed      func(error) // optional callback fired from Closed()
 }
 
 func newPeerModel() *peerModel {
 	return &peerModel{
-		folders:    make(map[string][]protocol.FileInfo),
-		lastUpdate: make(map[string]time.Time),
+		folders:       make(map[string][]protocol.FileInfo),
+		lastUpdate:    make(map[string]time.Time),
+		folderDevices: make(map[string][]protocol.DeviceID),
 	}
 }
 
@@ -67,7 +72,21 @@ func (m *peerModel) Request(_ protocol.Connection, _ *protocol.Request) (protoco
 	return nil, protocol.ErrNoSuchFile
 }
 
-func (m *peerModel) ClusterConfig(_ protocol.Connection, _ *protocol.ClusterConfig) error {
+// ClusterConfig records which devices the peer shares each folder with. The
+// peer may resend its ClusterConfig, so each folder's device list is replaced
+// rather than appended. Always arrives before any Index (the protocol
+// dispatcher rejects other messages until ClusterConfig settles the session),
+// so devicesForFolder is populated by the time WaitForIndex returns.
+func (m *peerModel) ClusterConfig(_ protocol.Connection, cc *protocol.ClusterConfig) error {
+	m.mu.Lock()
+	for _, f := range cc.Folders {
+		ids := make([]protocol.DeviceID, 0, len(f.Devices))
+		for _, d := range f.Devices {
+			ids = append(ids, d.ID)
+		}
+		m.folderDevices[f.ID] = ids
+	}
+	m.mu.Unlock()
 	return nil
 }
 
@@ -113,9 +132,9 @@ func (m *peerModel) waitForIndex(ctx context.Context, folderID string, timeout t
 				return nil // partial is better than nothing
 			}
 			return fmt.Errorf("timeout waiting for index of folder %q — "+
-					"check that (1) this device has been added and accepted in the peer's Syncthing web UI, "+
-					"(2) the folder is shared with this device on the peer, and "+
-					"(3) the folder ID matches exactly", folderID)
+				"check that (1) this device has been added and accepted in the peer's Syncthing web UI, "+
+				"(2) the folder is shared with this device on the peer, and "+
+				"(3) the folder ID matches exactly", folderID)
 		}
 		// Interruptible sleep: a cancel returns within microseconds rather than
 		// waiting out the poll period.
@@ -138,6 +157,21 @@ func (m *peerModel) files(folderID string) []protocol.FileInfo {
 		return nil
 	}
 	out := make([]protocol.FileInfo, len(src))
+	copy(out, src)
+	return out
+}
+
+// devicesForFolder returns a defensive copy of the device IDs the peer shares
+// folderID with, as captured from its ClusterConfig. Returns nil if no
+// ClusterConfig naming this folder has arrived.
+func (m *peerModel) devicesForFolder(folderID string) []protocol.DeviceID {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	src := m.folderDevices[folderID]
+	if src == nil {
+		return nil
+	}
+	out := make([]protocol.DeviceID, len(src))
 	copy(out, src)
 	return out
 }

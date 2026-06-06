@@ -21,6 +21,12 @@
 
 ## Claude generated
 
+ - [ ] Multi-host bookmarks (introducer) — limitations of the initial implementation:
+   - [ ] Fallback hosts are only learned *after* a successful connect to one host with the bookmark's `introducer` flag on. A brand-new introducer bookmark whose primary is offline on its very first connect has no fallbacks to try yet.
+   - [ ] `knownPeers` is replaced from the peer's ClusterConfig on each introducer connect (authoritative), so a device the peer temporarily omits is dropped from the fallback set until it reappears.
+   - [ ] A discovered fallback device is only reachable if global/LAN discovery can resolve its address AND it has authorised our device and shares the folder — we store the device ID regardless, so a connect attempt to an unusable fallback costs one discovery+dial budget before moving on.
+   - [ ] We trust whatever device IDs the introducer peer reports; there's no UI to prune individual fallbacks (only toggling `introducer` off, which clears them on next save).
+   - [ ] Android module not compiled/tested in the remote container (no NDK to build the AAR via `make gomobile`); only the Go layer and the pure `mergeKnownPeers` helper are unit-tested. Build & smoke-test the introducer flow locally (`make gomobile && make test-android`) before shipping.
  - [ ] APK build not verified in remote container — outbound network to `dl.google.com` is blocked so `./gradlew assembleDebug` can't resolve the Android Gradle Plugin. Build & smoke-test the fragment split locally before shipping.
  - [ ] `refreshListing` failures still post `UiState.Error`, which after the screen split bounces the user from the file list back to the connect screen. Consider routing this through `_errorEvent` too so a transient refresh failure leaves the existing listing visible.
  - [ ] Bookmark adapter doesn't highlight the bookmark that matches the currently-active connection, so after disconnecting it's not obvious which one you came from.
