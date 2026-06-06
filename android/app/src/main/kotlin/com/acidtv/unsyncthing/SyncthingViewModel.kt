@@ -91,6 +91,13 @@ data class PreviewReady(
     val file: File,
 )
 
+// CachedAddr holds a diallable address URL and the time it last connected
+// successfully. Used to skip discovery on reconnect.
+data class CachedAddr(
+    val addr: String,
+    val lastSeen: Long = 0L,
+)
+
 // knownPeers are additional device IDs discovered (from the peer's ClusterConfig)
 // as also sharing folderID. The primary peerID is the identity key and is tried
 // first; knownPeers are fallback hosts so the bookmark survives one host being
@@ -104,6 +111,7 @@ data class Bookmark(
     val folderID: String,
     val knownPeers: List<String> = emptyList(),
     val introducer: Boolean = false,
+    val cachedAddrs: List<CachedAddr> = emptyList(),
 )
 
 private data class CertData(
@@ -216,7 +224,8 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         // bookmark doesn't keep dialling hosts the user no longer trusts.
         val existing = current.firstOrNull { it.peerID == peerID && it.folderID == folderID }
         val keptPeers = if (introducer) existing?.knownPeers ?: emptyList() else emptyList()
-        val updated = upsertBookmark(current, Bookmark(name, peerID, folderID, keptPeers, introducer))
+        val keptCached = existing?.cachedAddrs ?: emptyList()
+        val updated = upsertBookmark(current, Bookmark(name, peerID, folderID, keptPeers, introducer, keptCached))
         writeBookmarks(updated)
     }
 
@@ -247,14 +256,46 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun updateCachedAddr(peerDeviceID: String, folderID: String, addr: String) {
+        // Relay addresses require a sequential invite+join handshake that
+        // typically exceeds the 2 s hint budget — caching them degrades
+        // reconnect speed rather than improving it.
+        if (!addr.startsWith("tcp://") && !addr.startsWith("tcp4://") && !addr.startsWith("tcp6://")) return
+        viewModelScope.launch(Dispatchers.Main) {
+            val current = _bookmarks.value ?: emptyList()
+            val existing = current.firstOrNull { it.peerID == peerDeviceID && it.folderID == folderID }
+                ?: return@launch
+            val now = System.currentTimeMillis()
+            val merged = (listOf(CachedAddr(addr, now)) + existing.cachedAddrs)
+                .distinctBy { it.addr }
+                .take(5)
+            writeBookmarks(upsertBookmark(current, existing.copy(cachedAddrs = merged)))
+        }
+    }
+
+    // Returns the cached hint addresses for the bookmark matching (primaryPeerID,
+    // folderID) as a comma-separated string, most-recently-successful first.
+    private fun savedHints(primaryPeerID: String, folderID: String): String =
+        (_bookmarks.value ?: emptyList())
+            .firstOrNull { it.peerID == primaryPeerID && it.folderID == folderID }
+            ?.cachedAddrs
+            ?.sortedByDescending { it.lastSeen }
+            ?.joinToString(",") { it.addr }
+            ?: ""
+
     private fun loadBookmarks(): List<Bookmark> {
         val raw = prefs.getString("bookmarks", null)
         if (raw != null) {
             val type = object : TypeToken<List<Bookmark>>() {}.type
             val parsed: List<Bookmark> = gson.fromJson(raw, type) ?: emptyList()
             // Gson bypasses Kotlin constructor defaults, so bookmarks saved
-            // before knownPeers existed deserialise with a null list. Normalise.
-            return parsed.map { it.copy(knownPeers = it.knownPeers ?: emptyList()) }
+            // before knownPeers/cachedAddrs existed deserialise with null lists. Normalise.
+            return parsed.map {
+                it.copy(
+                    knownPeers = it.knownPeers ?: emptyList(),
+                    cachedAddrs = it.cachedAddrs ?: emptyList(),
+                )
+            }
         }
         // Migration: seed from the legacy single-connection prefs so users
         // upgrading don't lose their saved peer/folder.
@@ -276,6 +317,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
         folderID: String,
         fallbackPeers: List<String> = emptyList(),
         introducer: Boolean = false,
+        cachedAddrs: List<CachedAddr> = emptyList(),
     ) {
         // Try the primary first, then (only as an introducer) any known fallback
         // hosts. Client.connect splits this CSV and walks the candidates until
@@ -311,8 +353,11 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 // Hold a MulticastLock while we wait for UDP broadcasts —
                 // some Wi-Fi power-save implementations drop them otherwise.
+                val hints = cachedAddrs
+                    .sortedByDescending { it.lastSeen }
+                    .joinToString(",") { it.addr }
                 withMulticastLock {
-                    newClient.connect(candidatesCsv, folderID, status)
+                    newClient.connect(candidatesCsv, folderID, hints, status)
                 }
                 // Bail before the (separately cancellable) index wait if Cancel
                 // already landed, closing the gap between connect() returning and
@@ -322,6 +367,15 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                     return@launch
                 }
                 newClient.waitForIndex(folderID, 30)
+                val connectedPeer = newClient.connectedPeerID()
+                val connectedAddr = newClient.connectedAddr()
+                // Only cache when we connected to the primary peer. A fallback
+                // peer's address would fail device-ID verification in the hint
+                // path (which verifies against the primary) and waste the 2 s
+                // budget on every subsequent reconnect.
+                if (connectedAddr.isNotEmpty() && (connectedPeer.isEmpty() || connectedPeer == peerDeviceID)) {
+                    updateCachedAddr(peerDeviceID, folderID, connectedAddr)
+                }
 
                 val json = String(newClient.listFolder(folderID))
                 val type = object : TypeToken<List<FileEntry>>() {}.type
@@ -345,7 +399,6 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 // arrived before the index) names the other devices sharing this
                 // folder. Remember them on the matching bookmark so future
                 // connects can fail over. Skipped when introducer is off.
-                val connectedPeer = newClient.connectedPeerID().ifEmpty { null }
                 if (introducer) {
                     val discovered = runCatching {
                         val devJson = String(newClient.folderDevices(folderID))
@@ -357,7 +410,7 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 val bookmarkName = bookmarkNameFor(_bookmarks.value ?: emptyList(), peerDeviceID, folderID)
-                _state.postValue(UiState.FileList(folderID, entries, bookmarkName = bookmarkName, connectedPeerID = connectedPeer))
+                _state.postValue(UiState.FileList(folderID, entries, bookmarkName = bookmarkName, connectedPeerID = connectedPeer.ifEmpty { null }))
             } catch (e: CancellationException) {
                 newClient?.close()
                 throw e
@@ -397,9 +450,11 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 if (!c.isConnected) {
                     val saved = savedConnection()
                         ?: throw IllegalStateException("connection lost; please reconnect")
-                    val (peerID, folder) = saved
+                    val (peerIDs, folder) = saved
+                    val primaryPeerID = peerIDs.split(",").first()
+                    val hints = savedHints(primaryPeerID, folder)
                     withMulticastLock {
-                        c.connect(peerID, folder, null)
+                        c.connect(peerIDs, folder, hints, null)
                     }
                     c.waitForIndex(folder, 30)
                 }
@@ -489,8 +544,10 @@ class SyncthingViewModel(app: Application) : AndroidViewModel(app) {
                 if (!c.isConnected) {
                     val saved = savedConnection()
                         ?: throw IllegalStateException("connection lost; please reconnect")
-                    val (peerID, folder) = saved
-                    withMulticastLock { c.connect(peerID, folder, null) }
+                    val (peerIDs, folder) = saved
+                    val primaryPeerID = peerIDs.split(",").first()
+                    val hints = savedHints(primaryPeerID, folder)
+                    withMulticastLock { c.connect(peerIDs, folder, hints, null) }
                     c.waitForIndex(folder, 30)
                 }
 

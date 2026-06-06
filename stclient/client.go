@@ -46,6 +46,10 @@ type Client struct {
 	// candidate peers it may differ from the one a bookmark was created with
 	// (failover); the Android layer surfaces it so a downed primary is visible.
 	connectedPeerID protocol.DeviceID
+	// connectedAddr is the raw URL dialled on the last successful Connect
+	// (e.g. "tcp://192.168.1.55:22000"). Returned by ConnectedAddr so the
+	// Android layer can persist it as a fast-path hint for the next connect.
+	connectedAddr string
 	// lastCloseErr records why the BEP session most recently dropped (the reason
 	// the protocol package passes to Closed). Surfaced by WaitForIndex so a peer
 	// that hangs up right after connect — typically because it hasn't accepted
@@ -129,7 +133,7 @@ type ConnectStatus interface {
 // discovery + address walk); the first that yields a verified connection wins,
 // so a bookmark survives any one host being offline. ConnectedPeerID reports
 // which one answered. Idempotent: any previous connection is closed first.
-func (c *Client) Connect(peerDeviceIDsStr, folderIDs string, status ConnectStatus) error {
+func (c *Client) Connect(peerDeviceIDsStr, folderIDs, hintAddrs string, status ConnectStatus) error {
 	peerIDStrs := splitFolderIDs(peerDeviceIDsStr)
 	if len(peerIDStrs) == 0 {
 		return fmt.Errorf("no peer device ID provided")
@@ -150,6 +154,7 @@ func (c *Client) Connect(peerDeviceIDsStr, folderIDs string, status ConnectStatu
 		c.conn = nil
 		c.model = nil
 		c.connectedPeerID = protocol.DeviceID{}
+		c.connectedAddr = ""
 	}
 	// Clear any stale close reason from a previous attempt so WaitForIndex can't
 	// report an old failure against this fresh connect.
@@ -171,33 +176,63 @@ func (c *Client) Connect(peerDeviceIDsStr, folderIDs string, status ConnectStatu
 	var transport, addr string
 	var peerID protocol.DeviceID
 	var peerErrs []string
-	for _, idStr := range peerIDStrs {
-		if ctx.Err() != nil {
-			return fmt.Errorf("connect cancelled")
+
+	// Fast path: try cached hint addresses against the primary peer with a
+	// short timeout before running full discovery. A stale or unreachable hint
+	// simply falls through to the discovery loop below. Pass nil for status so
+	// the UI holds "Looking up peer…" rather than flashing stale addresses.
+	if hintAddrs != "" {
+		if primaryID, perr := protocol.DeviceIDFromString(peerIDStrs[0]); perr == nil {
+			hints := splitFolderIDs(hintAddrs)
+			func() {
+				hintCtx, hintCancel := context.WithTimeout(ctx, 2*time.Second)
+				defer hintCancel()
+				tc, sc, a, herr := dialPeer(hintCtx, hints, primaryID, c.cert, tlsConf, nil)
+				if herr == nil {
+					tlsConn, transport, addr, peerID = tc, sc, a, primaryID
+				} else {
+					peerErrs = append(peerErrs, fmt.Sprintf("hint: %v", herr))
+				}
+			}()
 		}
-		candidatePeer, err := protocol.DeviceIDFromString(idStr)
-		if err != nil {
-			peerErrs = append(peerErrs, fmt.Sprintf("%s: invalid device ID: %v", idStr, err))
-			continue
-		}
-		addrs, derr := Discover(c.myID.String(), candidatePeer.String(), 8)
-		if derr != nil {
-			peerErrs = append(peerErrs, fmt.Sprintf("%s: discover: %v", candidatePeer.Short(), derr))
-			continue
-		}
-		tc, scheme, a, walkErr := dialPeer(ctx, addrs, candidatePeer, c.cert, tlsConf, status)
-		if walkErr != nil {
+	}
+
+	if tlsConn == nil {
+		for _, idStr := range peerIDStrs {
 			if ctx.Err() != nil {
 				return fmt.Errorf("connect cancelled")
 			}
-			peerErrs = append(peerErrs, fmt.Sprintf("%s: %v", candidatePeer.Short(), walkErr))
-			continue
+			candidatePeer, err := protocol.DeviceIDFromString(idStr)
+			if err != nil {
+				peerErrs = append(peerErrs, fmt.Sprintf("%s: invalid device ID: %v", idStr, err))
+				continue
+			}
+			addrs, derr := Discover(c.myID.String(), candidatePeer.String(), 8)
+			if derr != nil {
+				peerErrs = append(peerErrs, fmt.Sprintf("%s: discover: %v", candidatePeer.Short(), derr))
+				continue
+			}
+			tc, scheme, a, walkErr := dialPeer(ctx, addrs, candidatePeer, c.cert, tlsConf, status)
+			if walkErr != nil {
+				if ctx.Err() != nil {
+					return fmt.Errorf("connect cancelled")
+				}
+				peerErrs = append(peerErrs, fmt.Sprintf("%s: %v", candidatePeer.Short(), walkErr))
+				continue
+			}
+			tlsConn, transport, addr, peerID = tc, scheme, a, candidatePeer
+			break
 		}
-		tlsConn, transport, addr, peerID = tc, scheme, a, candidatePeer
-		break
 	}
 	if tlsConn == nil {
 		return fmt.Errorf("could not reach any peer: tried %d, %s", len(peerIDStrs), strings.Join(peerErrs, "; "))
+	}
+	// Guard against a CancelConnect that arrived while the last dial was
+	// in flight: if we proceed to BEP Hello with a cancelled ctx the
+	// handshake runs for up to handshakeTimeout (30 s) before giving up.
+	if ctx.Err() != nil {
+		tlsConn.Close()
+		return fmt.Errorf("connect cancelled")
 	}
 
 	// BEP Hello exchange — protocol.NewConnection does NOT do this.
@@ -232,6 +267,7 @@ func (c *Client) Connect(peerDeviceIDsStr, folderIDs string, status ConnectStatu
 				c.conn = nil
 				c.model = nil
 				c.connectedPeerID = protocol.DeviceID{}
+				c.connectedAddr = ""
 				// Remember why the peer hung up so WaitForIndex can explain it.
 				c.lastCloseErr = err
 			}
@@ -254,6 +290,7 @@ func (c *Client) Connect(peerDeviceIDsStr, folderIDs string, status ConnectStatu
 	c.conn = conn
 	c.model = model
 	c.connectedPeerID = peerID
+	c.connectedAddr = addr
 	c.mu.Unlock()
 
 	conn.Start()
@@ -312,7 +349,16 @@ func (c *Client) Close() {
 		c.conn = nil
 		c.model = nil
 		c.connectedPeerID = protocol.DeviceID{}
+		c.connectedAddr = ""
 	}
+}
+
+// ConnectedAddr returns the address URL dialled on the last successful
+// Connect (e.g. "tcp://192.168.1.55:22000"). Returns "" when not connected.
+func (c *Client) ConnectedAddr() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.connectedAddr
 }
 
 // ConnectedPeerID returns the device ID we're currently connected to, or ""
