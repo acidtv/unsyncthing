@@ -15,6 +15,20 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        // Override the auto-generated debug key with a committed keystore so the
+        // debug signature is identical on every machine and never silently
+        // changes. The default ~/.android/debug.keystore expires and gets
+        // regenerated, which then causes INSTALL_FAILED_UPDATE_INCOMPATIBLE on
+        // reinstall. The `debug` build type uses this config automatically.
+        // This is a debug-only key and is intentionally not secret.
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
     buildTypes {
         release {
             isMinifyEnabled = false
