@@ -179,16 +179,21 @@ func (c *Client) Connect(peerDeviceIDsStr, folderIDs, hintAddrs string, status C
 
 	// Fast path: try cached hint addresses against the primary peer with a
 	// short timeout before running full discovery. A stale or unreachable hint
-	// simply falls through to the discovery loop below.
-	if hintAddrs != "" && len(peerIDStrs) > 0 {
+	// simply falls through to the discovery loop below. Pass nil for status so
+	// the UI holds "Looking up peer…" rather than flashing stale addresses.
+	if hintAddrs != "" {
 		if primaryID, perr := protocol.DeviceIDFromString(peerIDStrs[0]); perr == nil {
 			hints := splitFolderIDs(hintAddrs)
-			hintCtx, hintCancel := context.WithTimeout(ctx, 2*time.Second)
-			tc, sc, a, herr := dialPeer(hintCtx, hints, primaryID, c.cert, tlsConf, status)
-			hintCancel()
-			if herr == nil {
-				tlsConn, transport, addr, peerID = tc, sc, a, primaryID
-			}
+			func() {
+				hintCtx, hintCancel := context.WithTimeout(ctx, 2*time.Second)
+				defer hintCancel()
+				tc, sc, a, herr := dialPeer(hintCtx, hints, primaryID, c.cert, tlsConf, nil)
+				if herr == nil {
+					tlsConn, transport, addr, peerID = tc, sc, a, primaryID
+				} else {
+					peerErrs = append(peerErrs, fmt.Sprintf("hint: %v", herr))
+				}
+			}()
 		}
 	}
 
@@ -221,6 +226,13 @@ func (c *Client) Connect(peerDeviceIDsStr, folderIDs, hintAddrs string, status C
 	}
 	if tlsConn == nil {
 		return fmt.Errorf("could not reach any peer: tried %d, %s", len(peerIDStrs), strings.Join(peerErrs, "; "))
+	}
+	// Guard against a CancelConnect that arrived while the last dial was
+	// in flight: if we proceed to BEP Hello with a cancelled ctx the
+	// handshake runs for up to handshakeTimeout (30 s) before giving up.
+	if ctx.Err() != nil {
+		tlsConn.Close()
+		return fmt.Errorf("connect cancelled")
 	}
 
 	// BEP Hello exchange — protocol.NewConnection does NOT do this.
